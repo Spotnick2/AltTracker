@@ -1,0 +1,17 @@
+## Interface: 20504
+## Title: AltTracker
+## Notes: Alt tracker
+## Author: You
+## Version: 3.0
+## SavedVariables: AltTrackerDB AltTrackerConfig
+
+Core.lua
+Scanner.lua
+Reputations.lua
+Config.lua
+Toasts.lua
+BisData.lua
+Columns.lua
+RowRenderer.lua
+SheetUI.lua
+Export.lua
