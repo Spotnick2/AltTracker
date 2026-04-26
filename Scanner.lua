@@ -43,6 +43,10 @@ local GEAR_SLOTS = {
     { id=18, key="ranged"   },
 }
 
+local function Round2(value)
+    return math.floor((tonumber(value) or 0) * 100 + 0.5) / 100
+end
+
 local function ResetCharacter(char)
 
     -- primary professions (legacy fields kept for compat)
@@ -205,6 +209,77 @@ function AltTracker.ScanCharacter()
     --------------------------------------------------------
 
     ResetCharacter(char)
+
+    --------------------------------------------------------
+    -- Core stat snapshot (for offline detail view)
+    --------------------------------------------------------
+
+    local _, statStr = UnitStat("player", 1)
+    local _, statAgi = UnitStat("player", 2)
+    local _, statSta = UnitStat("player", 3)
+    local _, statInt = UnitStat("player", 4)
+    local _, statSpi = UnitStat("player", 5)
+
+    char.stat_str = statStr or 0
+    char.stat_agi = statAgi or 0
+    char.stat_sta = statSta or 0
+    char.stat_int = statInt or 0
+    char.stat_spi = statSpi or 0
+
+    char.stat_hp = UnitHealthMax("player") or 0
+
+    local manaMax = 0
+    if UnitPowerMax then
+        manaMax = UnitPowerMax("player", 0) or 0
+    elseif UnitManaMax then
+        manaMax = UnitManaMax("player") or 0
+    elseif UnitMana then
+        manaMax = UnitMana("player") or 0
+    end
+    char.stat_mana = manaMax
+
+    local _, effectiveArmor = UnitArmor("player")
+    char.stat_armor = effectiveArmor or 0
+
+    local baseAP, posAP, negAP = UnitAttackPower("player")
+    char.stat_ap = (baseAP or 0) + (posAP or 0) + (negAP or 0)
+
+    local spellPower = 0
+    if GetSpellBonusDamage then
+        for school = 2, 7 do
+            local sp = GetSpellBonusDamage(school) or 0
+            if sp > spellPower then
+                spellPower = sp
+            end
+        end
+    end
+    char.stat_sp = spellPower
+
+    char.stat_crit = 0
+    if GetCombatRatingBonus and CR_CRIT_MELEE then
+        char.stat_crit = Round2(GetCombatRatingBonus(CR_CRIT_MELEE))
+    end
+
+    char.stat_hitpct = 0
+    if GetCombatRatingBonus and CR_HIT_MELEE then
+        char.stat_hitpct = Round2(GetCombatRatingBonus(CR_HIT_MELEE))
+    end
+
+    char.stat_haste = 0
+    if GetCombatRatingBonus and CR_HASTE_MELEE then
+        char.stat_haste = Round2(GetCombatRatingBonus(CR_HASTE_MELEE))
+    end
+
+    local baseDef, modDef = UnitDefense("player")
+    char.stat_defense = (baseDef or 0) + (modDef or 0)
+
+    char.stat_resilience = 0
+    local resilIndex = CR_RESILIENCE_CRIT_TAKEN
+        or COMBAT_RATING_RESILIENCE_PLAYER_DAMAGE_TAKEN
+        or CR_RESILIENCE_PLAYER_DAMAGE_TAKEN
+    if GetCombatRating and resilIndex then
+        char.stat_resilience = GetCombatRating(resilIndex) or 0
+    end
 
     --------------------------------------------------------
     -- Scan professions

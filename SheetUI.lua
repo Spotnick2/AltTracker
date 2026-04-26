@@ -343,8 +343,15 @@ local function UpdateRows()
                 AltTracker.RenderFrozenCharRow(frow,item.data,firstIndex+i-1)
             end
         else
-            AltTracker.HideRow(row)
-            AltTracker.HideFrozenRow(frow)
+            -- Beyond the last data row but still inside the visible body
+            -- area. Paint a filler row in the alternating-bg color so the
+            -- table reads as continuing past the last alt — instead of
+            -- leaving a dead block the user can see through to the world.
+            -- index passed to renderer continues the alternating pattern
+            -- from the last real row.
+            local fillerIndex = firstIndex + i - 1
+            AltTracker.RenderFillerRow(row, fillerIndex)
+            AltTracker.RenderFrozenFillerRow(frow, fillerIndex)
         end
     end
 end
@@ -755,6 +762,23 @@ local function ComputeContentSize()
             + (needsH and HSCROLL_GUTTER_H or 0)            -- h-scrollbar gutter
             + (AltTracker.LAYOUT.FOOTER_HEIGHT or 22)       -- totals bar
             + 2                                             -- breath above frame border
+
+    -- Sidebar height floor.
+    --
+    -- The sidebar holds N navigation buttons + a bottom block (Filter row,
+    -- Hide-below checkbox). Plugins can register more buttons at runtime,
+    -- so the required height is queried live, not hardcoded.
+    --
+    -- When the data grid is shorter than the sidebar — few alts on a
+    -- single realm, realm collapsed, or any plugin section that returns
+    -- a small list — the frame must still be tall enough that the bottom
+    -- sidebar controls don't overlap the totals bar. Force the frame
+    -- height up to the sidebar minimum here. The body grid below pads
+    -- itself with empty filler rows in UpdateRows() so the table reads
+    -- as continuing past the last data row.
+    local sidebarMin = TITLE_H + (AltTracker.GetSidebarRequiredHeight and AltTracker.GetSidebarRequiredHeight() or 0)
+    if h < sidebarMin then h = sidebarMin end
+
     return w, h, needsH, needsV
 end
 
@@ -1019,6 +1043,29 @@ local function CreateFrameIfNeeded()
     --------------------------------------------------------
 
     sidebar._pluginBtnY = btnY  -- tracked so late-registering plugins can append
+
+    -- Returns the vertical space the sidebar needs to display all of its
+    -- buttons + the bottom controls (filter row + hideLow checkbox) without
+    -- the bottom items overlapping the topmost data rows or the totals bar.
+    --
+    -- Used by ComputeContentSize so the frame is at least sidebar-tall when
+    -- the data grid would otherwise be shorter (few characters, all on one
+    -- realm, the realm group collapsed, etc.). Recomputes live whenever
+    -- it's called, so plugin-added buttons that grow the sidebar make the
+    -- minimum frame height grow automatically.
+    --
+    -- Math: btnY starts at -8 (top inset) and decrements by 27 per button.
+    -- _pluginBtnY is the next-empty-Y after all buttons. The bottom controls
+    -- (sbDiv2 at y=42 from BOTTOMLEFT, filter row, checkbox row) reserve
+    -- 64px below the last button. 8px breathing space at the very bottom.
+    local SIDEBAR_TOP_INSET     = 8
+    local SIDEBAR_BOTTOM_FOOTER = 64
+    local SIDEBAR_BOTTOM_BREATH = 8
+    AltTracker.GetSidebarRequiredHeight = function()
+        if not sidebar or not sidebar._pluginBtnY then return 0 end
+        local buttonsHeight = SIDEBAR_TOP_INSET + (-sidebar._pluginBtnY) - SIDEBAR_TOP_INSET
+        return buttonsHeight + SIDEBAR_BOTTOM_FOOTER + SIDEBAR_BOTTOM_BREATH
+    end
 
     local function MakePluginButton(plugin)
         local pbtn=CreateFrame("Button",nil,sidebar,"BackdropTemplate")

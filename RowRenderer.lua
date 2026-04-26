@@ -969,6 +969,24 @@ function AltTracker.HideRow(row)
     row:Hide()
 end
 
+-- Filler row: visible row beyond the last data item, painted in the
+-- alternating-row background color so the table reads as continuing past
+-- the last alt. No text, no class tint, no group label, no column dividers.
+-- Used when the frame is taller than the data needs (e.g. few characters,
+-- realm group collapsed, sidebar drives the minimum height). The filler
+-- index is 1-based RELATIVE to the start of the filler region so the
+-- alternating pattern continues seamlessly from the last real row.
+function AltTracker.RenderFillerRow(row, index)
+    SetRowBg(row, index)
+    if row.classTint  then row.classTint:SetColorTexture(0,0,0,0) end
+    if row.groupLabel then row.groupLabel:Hide() end
+    -- Show dividers so the column lines extend visually through the empty
+    -- space — like a real spreadsheet's empty rows below the last data row.
+    if row.dividers then for _, d in ipairs(row.dividers) do d:Show() end end
+    for _, cell in ipairs(row.cells) do cell:SetText("") end
+    row:Show()
+end
+
 ------------------------------------------------------------
 -- Frozen column row  (Name only)
 ------------------------------------------------------------
@@ -1103,4 +1121,15 @@ function AltTracker.HideFrozenRow(row)
     row.nameLabel:SetText("")
     if row.nameTipBtn then row.nameTipBtn.charData = nil end
     row:Hide()
+end
+
+-- Filler row on the frozen side. Same alternating-bg as the scrollable
+-- side filler. No name, no class icon, no collapse button.
+function AltTracker.RenderFrozenFillerRow(row, index)
+    SetRowBg(row, index)
+    if row.classTint then row.classTint:SetColorTexture(0,0,0,0) end
+    row.collapseBtn:Hide()
+    row.nameLabel:SetText("")
+    if row.nameTipBtn then row.nameTipBtn.charData = nil end
+    row:Show()
 end
