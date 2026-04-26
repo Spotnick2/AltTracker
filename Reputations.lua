@@ -34,6 +34,13 @@ local TBC_REPUTATIONS = {
 
 function AltTracker.ScanReputations(char)
 
+    -- Clear any previous values so rep that the character no longer
+    -- has visible (never discovered, or removed from tracking) doesn't
+    -- persist stale data from an earlier scan or sync.
+    for _, key in pairs(TBC_REPUTATIONS) do
+        char[key] = nil
+    end
+
     for i = 1, GetNumFactions() do
 
         local name, _, standing = GetFactionInfo(i)

@@ -168,6 +168,23 @@ function AltTracker.ScanCharacter()
 
     --------------------------------------------------------
     -- Rested XP
+    --
+    -- We store the current snapshot plus enough context to
+    -- extrapolate rested XP forward for this character while
+    -- they're offline.  See RowRenderer for the extrapolation.
+    --   restXP       : current rested XP (raw)
+    --   restPercent  : rested as % of XP-to-next-level (0..150)
+    --   xpMax        : UnitXPMax at scan time — needed so the
+    --                  renderer can re-divide if the restXP
+    --                  value is still useful offline
+    --   restedArea   : true if the character was in an inn /
+    --                  rested-state zone at scan time.  In TBC,
+    --                  rested XP accrues at 2x the normal rate
+    --                  while in a rested area.
+    --   restTimestamp: when the snapshot was taken.  Normally
+    --                  the same as lastUpdate but kept separate
+    --                  so we can always trust it for the
+    --                  offline extrapolation math.
     --------------------------------------------------------
 
     local rested = GetXPExhaustion() or 0
@@ -175,6 +192,9 @@ function AltTracker.ScanCharacter()
 
     char.restXP = rested
     char.restPercent = math.floor((rested / nextXP) * 100)
+    char.xpMax = nextXP
+    char.restedArea = IsResting and IsResting() or false
+    char.restTimestamp = time()
 
     -- XP progress toward next level (0-100%), only meaningful below cap
     local currentXP = UnitXP("player") or 0

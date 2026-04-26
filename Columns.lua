@@ -1,13 +1,20 @@
 AltTracker = AltTracker or {}
 
--- Vertical rep column helper (now with icon support)
+------------------------------------------------------------
+-- Custom TBC faction icons
+-- Loaded from Media/Icons/Reputations/ as 64x64 TGA files
+-- matching the field/slug name of each faction.
+------------------------------------------------------------
+
+local RICON_PATH = "Interface\\AddOns\\AltTracker\\Media\\Icons\\Reputations\\"
+local function RI(slug) return RICON_PATH .. slug .. ".tga" end
+
 local function rep(label, field, vertLabel, icon)
     return { label=label, field=field, width=22, align="RIGHT",
              type="rep", vertical=true, verticalLabel=vertLabel, group="rep",
              repIcon=icon }
 end
 
--- Combined Aldor/Scryers
 local function repCombo(label, field1, field2, vertLabel, icon)
     return { label=label, field=field1, field2=field2, width=22, align="RIGHT",
              type="repCombined", vertical=true, verticalLabel=vertLabel, group="rep",
@@ -30,47 +37,32 @@ AltTracker.Columns = {
     { label="Race",  field="race",  width=22, align="CENTER", type="raceIcon",  group="always" },
     { label="Lvl",   field="level", width=35, align="RIGHT",  type="number",    group="always" },
     { label="iLvl",  field="ilvl",  width=45, align="RIGHT",  type="number",    group="always" },
-    { label="BiS",   field="bisCount", width=38, align="RIGHT", type="bisCount", group="always" },
+    { label="BiS",   field="bisCount", width=38, align="RIGHT", type="bisCount", group="always",
+      headerIcon="Interface\\AddOns\\AltTracker\\Media\\BisIcon.tga", headerNoBg=true },
 
-    -- Gear slots (group="gear") — using colorful icons from Interface\Icons
-    { label="Head",      field="gear_head",     width=32, align="RIGHT", type="gearSlot", group="gear",
-      slotIcon="Interface\\Icons\\INV_Helmet_04" },
-    { label="Neck",      field="gear_neck",     width=32, align="RIGHT", type="gearSlot", group="gear",
-      slotIcon="Interface\\Icons\\INV_Jewelry_Amulet_06" },
-    { label="Shoulder",  field="gear_shoulder", width=32, align="RIGHT", type="gearSlot", group="gear",
-      slotIcon="Interface\\Icons\\INV_Shoulder_02" },
-    { label="Back",      field="gear_back",     width=32, align="RIGHT", type="gearSlot", group="gear",
-      slotIcon="Interface\\Icons\\INV_Misc_Cape_11" },
-    { label="Chest",     field="gear_chest",    width=32, align="RIGHT", type="gearSlot", group="gear",
-      slotIcon="Interface\\Icons\\INV_Chest_Chain_05" },
-    { label="Wrist",     field="gear_wrist",    width=32, align="RIGHT", type="gearSlot", group="gear",
-      slotIcon="Interface\\Icons\\INV_Bracer_07" },
-    { label="Hands",     field="gear_hands",    width=32, align="RIGHT", type="gearSlot", group="gear",
-      slotIcon="Interface\\Icons\\INV_Gauntlets_05" },
-    { label="Waist",     field="gear_waist",    width=32, align="RIGHT", type="gearSlot", group="gear",
-      slotIcon="Interface\\Icons\\INV_Belt_01" },
-    { label="Legs",      field="gear_legs",     width=32, align="RIGHT", type="gearSlot", group="gear",
-      slotIcon="Interface\\Icons\\INV_Pants_06" },
-    { label="Feet",      field="gear_feet",     width=32, align="RIGHT", type="gearSlot", group="gear",
-      slotIcon="Interface\\Icons\\INV_Boots_09" },
-    { label="Ring 1",    field="gear_ring1",    width=32, align="RIGHT", type="gearSlot", group="gear",
-      slotIcon="Interface\\Icons\\INV_Jewelry_Ring_03" },
-    { label="Ring 2",    field="gear_ring2",    width=32, align="RIGHT", type="gearSlot", group="gear",
-      slotIcon="Interface\\Icons\\INV_Jewelry_Ring_03" },
-    { label="Trinket 1", field="gear_trinket1", width=32, align="RIGHT", type="gearSlot", group="gear",
-      slotIcon="Interface\\Icons\\INV_Jewelry_Talisman_07" },
-    { label="Trinket 2", field="gear_trinket2", width=32, align="RIGHT", type="gearSlot", group="gear",
-      slotIcon="Interface\\Icons\\INV_Jewelry_Talisman_07" },
-    { label="Main Hand", field="gear_mainhand", width=32, align="RIGHT", type="gearSlot", group="gear",
-      slotIcon="Interface\\Icons\\INV_Sword_04" },
-    { label="Off Hand",  field="gear_offhand",  width=32, align="RIGHT", type="gearSlot", group="gear",
-      slotIcon="Interface\\Icons\\INV_Shield_04" },
-    { label="Ranged",    field="gear_ranged",   width=32, align="RIGHT", type="gearSlot", group="gear",
-      slotIcon="Interface\\Icons\\INV_Weapon_Bow_05" },
+    -- Gear slots — slotSlug drives icon resolution via AltTracker.GetGearIconPath()
+    -- at header-build time so Alliance/Horde icons update based on logged-in character.
+    { label="Head",      field="gear_head",     slotSlug="head",      width=32, align="RIGHT", type="gearSlot", group="gear" },
+    { label="Neck",      field="gear_neck",     slotSlug="neck",      width=32, align="RIGHT", type="gearSlot", group="gear" },
+    { label="Shoulder",  field="gear_shoulder", slotSlug="shoulders", width=32, align="RIGHT", type="gearSlot", group="gear" },
+    { label="Back",      field="gear_back",     slotSlug="back",      width=32, align="RIGHT", type="gearSlot", group="gear" },
+    { label="Chest",     field="gear_chest",    slotSlug="chest",     width=32, align="RIGHT", type="gearSlot", group="gear" },
+    { label="Wrist",     field="gear_wrist",    slotSlug="wrists",    width=32, align="RIGHT", type="gearSlot", group="gear" },
+    { label="Hands",     field="gear_hands",    slotSlug="hands",     width=32, align="RIGHT", type="gearSlot", group="gear" },
+    { label="Waist",     field="gear_waist",    slotSlug="waist",     width=32, align="RIGHT", type="gearSlot", group="gear" },
+    { label="Legs",      field="gear_legs",     slotSlug="legs",      width=32, align="RIGHT", type="gearSlot", group="gear" },
+    { label="Feet",      field="gear_feet",     slotSlug="feet",      width=32, align="RIGHT", type="gearSlot", group="gear" },
+    { label="Ring 1",    field="gear_ring1",    slotSlug="ring1",     width=32, align="RIGHT", type="gearSlot", group="gear" },
+    { label="Ring 2",    field="gear_ring2",    slotSlug="ring2",     width=32, align="RIGHT", type="gearSlot", group="gear" },
+    { label="Trinket 1", field="gear_trinket1", slotSlug="trinket1",  width=32, align="RIGHT", type="gearSlot", group="gear" },
+    { label="Trinket 2", field="gear_trinket2", slotSlug="trinket2",  width=32, align="RIGHT", type="gearSlot", group="gear" },
+    { label="Main Hand", field="gear_mainhand", slotSlug="mainhand",  width=32, align="RIGHT", type="gearSlot", group="gear" },
+    { label="Off Hand",  field="gear_offhand",  slotSlug="offhand",   width=32, align="RIGHT", type="gearSlot", group="gear" },
+    { label="Ranged",    field="gear_ranged",   slotSlug="ranged",    width=32, align="RIGHT", type="gearSlot", group="gear" },
 
     -- Info (always visible — shown in name tooltip but kept as columns too)
     { label="Guild",       field="guild",       width=110, align="LEFT",  type="text",       group="always" },
-    { label="Rest XP",     field="restPercent", width=50,  align="RIGHT", type="restXP",     group="always" },
+    { label="Rested XP",   field="restPercent", width=70,  align="RIGHT", type="restXP",     group="always" },
     { label="Gold",        field="money",       width=150, align="RIGHT", type="money",      group="always" },
     { label="Last Online", field="lastUpdate",  width=85,  align="RIGHT", type="lastOnline", group="always" },
 
@@ -91,24 +83,24 @@ AltTracker.Columns = {
     prof("Riding",        "riding",              "ridingMax",              "Interface\\Icons\\Ability_Mount_RidingHorse"),
 
     -- Reputations (with faction icons for headers)
-    repCombo("Aldor / Scryers", "aldor", "scryer", "Al/Scr", "Interface\\Icons\\INV_Enchant_ShardBrilliantSmall"),
-    rep("The Sha'tar",           "shatar",       "Sha'tr", "Interface\\Icons\\Spell_Holy_PowerWordBarrier"),
-    rep("Lower City",            "lowercity",    "LowCit", "Interface\\Icons\\Spell_Shadow_DetectLesserInvisibility"),
-    rep("Cenarion Expedition",   "cenarion",     "CenExp", "Interface\\Icons\\INV_Misc_Head_Dragon_Green"),
-    rep("The Consortium",        "consortium",   "Consrt", "Interface\\Icons\\INV_Misc_Gem_Bloodstone_03"),
-    rep("Keepers of Time",       "keepers",      "KoT",    "Interface\\Icons\\INV_Misc_Head_Dragon_Bronze"),
-    rep("The Violet Eye",        "violeteye",    "VioEye", "Interface\\Icons\\INV_Jewelry_Ring_54"),
-    rep("Sporeggar",             "sporeggar",    "Spore",  "Interface\\Icons\\INV_Mushroom_11"),
-    rep("Honor Hold",            "honorhold",    "HonHld", "Interface\\Icons\\Spell_Holy_SealOfValor"),
-    rep("Thrallmar",             "thrallmar",    "Thrall", "Interface\\Icons\\Spell_Shadow_DeathPact"),
-    rep("Kurenai",               "kurenai",      "Kurnai", "Interface\\Icons\\INV_Misc_Foot_Centaur"),
-    rep("The Mag'har",           "maghar",       "Mag'hr", "Interface\\Icons\\INV_Misc_Head_Orc_01"),
-    rep("Ogri'la",               "ogrila",       "Ogri'l", "Interface\\Icons\\INV_Misc_Apexis_Crystal"),
-    rep("Sha'tari Skyguard",     "skyguard",     "Skygrd", "Interface\\Icons\\Ability_Mount_FlyingMachine"),
-    rep("Netherwing",            "netherwing",   "Netwng", "Interface\\Icons\\Ability_Mount_NetherdrakePurple"),
-    rep("Ashtongue Deathsworn",  "ashtongue",    "Ashtnge","Interface\\Icons\\Spell_Shadow_SummonVoidWalker"),
-    rep("The Scale of the Sands","scaleofsands", "ScalSd", "Interface\\Icons\\INV_Misc_Head_Dragon_Bronze"),
-    rep("Shattered Sun",         "shatteredsun", "ShatSun","Interface\\Icons\\Spell_Holy_RighteousFury"),
+    repCombo("Aldor / Scryers", "aldor", "scryer", "Al/Scr", RI("aldor")),
+    rep("The Sha'tar",           "shatar",       "Sha'tr", RI("shatar")),
+    rep("Lower City",            "lowercity",    "LowCit", RI("lowercity")),
+    rep("Cenarion Expedition",   "cenarion",     "CenExp", RI("cenarion")),
+    rep("The Consortium",        "consortium",   "Consrt", RI("consortium")),
+    rep("Keepers of Time",       "keepers",      "KoT",    RI("keepers")),
+    rep("The Violet Eye",        "violeteye",    "VioEye", RI("violeteye")),
+    rep("Sporeggar",             "sporeggar",    "Spore",  RI("sporeggar")),
+    rep("Honor Hold",            "honorhold",    "HonHld", RI("honorhold")),
+    rep("Thrallmar",             "thrallmar",    "Thrall", RI("thrallmar")),
+    rep("Kurenai",               "kurenai",      "Kurnai", RI("kurenai")),
+    rep("The Mag'har",           "maghar",       "Mag'hr", RI("maghar")),
+    rep("Ogri'la",               "ogrila",       "Ogri'l", RI("ogrila")),
+    rep("Sha'tari Skyguard",     "skyguard",     "Skygrd", RI("skyguard")),
+    rep("Netherwing",            "netherwing",   "Netwng", RI("netherwing")),
+    rep("Ashtongue Deathsworn",  "ashtongue",    "Ashtnge",RI("ashtongue")),
+    rep("The Scale of the Sands","scaleofsands", "ScalSd", RI("scaleofsands")),
+    rep("Shattered Sun",         "shatteredsun", "ShatSun",RI("shatteredsun")),
 }
 
 function AltTracker.GetTotalColumnWidth()

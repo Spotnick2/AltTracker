@@ -1,6 +1,66 @@
 AltTracker = AltTracker or {}
 
 ------------------------------------------------------------
+-- Rested XP live extrapolation
+--
+-- TBC accrues rested XP at:
+--   * 5% of a level per 8 hours  while in a rested area (inn/city)
+--   * 5% of a level per 32 hours while in the open world
+-- Cap is 150% of a level.
+--
+-- We store at scan time: restXP (raw), xpMax (so % is recomputable),
+-- restedArea (was the char in a rested zone at logout?), and
+-- restTimestamp (when the snapshot was taken).
+--
+-- Given that frozen snapshot, we can compute the current rested %
+-- for any character — including ones not currently logged in —
+-- without needing them to log in again.
+------------------------------------------------------------
+
+local function ComputeLiveRestedPercent(char)
+    if not char then return 0, 0 end
+
+    -- Level 70s don't accrue rested XP (pre-expansion level cap)
+    local lvl = char.level or 0
+    if lvl >= 70 then return 0, 0 end
+
+    -- For the currently-logged-in character, ALWAYS read the live API.
+    -- Stored values are a per-snapshot approximation that only moves up
+    -- (when rested accrues); actual in-game rested also moves down as
+    -- the character burns it at 2x XP.  The live API is the source of
+    -- truth for the player character.
+    if UnitGUID("player") == char.guid then
+        local liveRest = GetXPExhaustion() or 0
+        local liveMax  = UnitXPMax("player") or 1
+        if liveMax > 0 then
+            return math.floor((liveRest / liveMax) * 100 + 0.5), 0
+        end
+        return 0, 0
+    end
+
+    -- Offline / other-character path: extrapolate from last snapshot.
+    local snapshotTime = char.restTimestamp or char.lastUpdate or 0
+    local now          = time()
+    local elapsed      = math.max(0, now - snapshotTime)
+
+    local storedPercent = char.restPercent or 0
+
+    -- Accrual rate (% of a level per hour)
+    --   rested area: 5% per 8h  = 0.625 %/h
+    --   open world:  5% per 32h = 0.15625 %/h
+    local perHour = (char.restedArea and 0.625) or 0.15625
+    local addedPercent = (elapsed / 3600) * perHour
+
+    local live = storedPercent + addedPercent
+    if live > 150 then live = 150 end
+
+    return math.floor(live + 0.5), addedPercent
+end
+
+AltTracker.ComputeLiveRestedPercent = ComputeLiveRestedPercent
+
+
+------------------------------------------------------------
 -- Profession icons
 ------------------------------------------------------------
 
@@ -145,6 +205,9 @@ end
 -- Returns: displayCount, colorRatio (0-1)
 -- 2H weapons count as 2 slots for the color ratio
 -- (since they occupy mainhand+offhand) but 1 for display.
+-- For Feral Combat druids, both Cat and Bear lists are checked;
+-- the one that yields the higher ratio is used so that a bear-geared
+-- character is not penalised against the Cat BiS list (and vice versa).
 ------------------------------------------------------------
 
 local ALL_GEAR_KEYS = {
@@ -154,8 +217,64 @@ local ALL_GEAR_KEYS = {
 }
 local MAX_GEAR_SLOTS = #ALL_GEAR_KEYS  -- 17
 
+-- Internal helper: count BiS items for an explicit spec override
+local function CountBisForSpec(char, specOverride)
+    local count = 0
+    for _, slotKey in ipairs(ALL_GEAR_KEYS) do
+        local itemName = char["gearname_"..slotKey] or ""
+        -- Temporarily use specOverride instead of char.spec
+        local bisData = AltTracker.BisData
+        if bisData then
+            local classData = bisData[char.class]
+            if classData then
+                local specData = classData[specOverride]
+                if specData then
+                    local matched = false
+                    local TIER_ORDER = {"T4","T5","T6","Sunwell"}
+                    for _, tier in ipairs(TIER_ORDER) do
+                        local tierData = specData[tier]
+                        if tierData and tierData[slotKey] and itemName ~= "" then
+                            local items = tierData[slotKey]
+                            if type(items) == "string" then
+                                if items == itemName then matched = true; break end
+                            elseif type(items) == "table" then
+                                for _, bisName in ipairs(items) do
+                                    if bisName == itemName then matched = true; break end
+                                end
+                            end
+                        end
+                        if matched then break end
+                    end
+                    if matched then count = count + 1 end
+                end
+            end
+        end
+    end
+    -- 2H bonus
+    local colorCount = count
+    local ohIlvl = char.gear_offhand or 0
+    local mhName = char.gearname_mainhand or ""
+    if ohIlvl == 0 and IsItemBis(char.class, specOverride, "mainhand", mhName) then
+        colorCount = colorCount + 1
+    end
+    local ratio = colorCount / MAX_GEAR_SLOTS
+    return count, math.min(ratio, 1.0)
+end
+
 local function CountBisItems(char)
     if not char or not char.class or not char.spec then return 0, 0 end
+
+    -- Feral Combat: score against both Cat and Bear lists, keep the better result
+    if char.spec == "Feral Combat" then
+        local catCount, catRatio   = CountBisForSpec(char, "Feral Combat")
+        local bearCount, bearRatio = CountBisForSpec(char, "Feral Combat (Bear)")
+        if bearRatio > catRatio then
+            return bearCount, bearRatio
+        end
+        return catCount, catRatio
+    end
+
+    -- All other specs: standard path
     local count = 0
     for _, slotKey in ipairs(ALL_GEAR_KEYS) do
         local itemName = char["gearname_"..slotKey] or ""
@@ -163,7 +282,6 @@ local function CountBisItems(char)
             count = count + 1
         end
     end
-    -- 2H weapon bonus: if mainhand is BiS and offhand is empty, count +1 for color
     local colorCount = count
     local ohIlvl = char.gear_offhand or 0
     local mhName = char.gearname_mainhand or ""
@@ -381,15 +499,25 @@ end
 
 ------------------------------------------------------------
 -- Shared row background colours
+-- Using full-opacity colours so the class tint layer sits
+-- cleanly on top at low alpha.
 ------------------------------------------------------------
 
 local function SetRowBg(row, index)
-    if index%2==0 then row.bg:SetColorTexture(0.09,0.09,0.12,0.5)
-    else               row.bg:SetColorTexture(0.05,0.05,0.07,0.5)
+    local C = AltTracker.C
+    if index % 2 == 0 then
+        row.bg:SetColorTexture(
+            C.BG_ROW_EVEN[1], C.BG_ROW_EVEN[2],
+            C.BG_ROW_EVEN[3], C.BG_ROW_EVEN[4])
+    else
+        row.bg:SetColorTexture(
+            C.BG_ROW_ODD[1], C.BG_ROW_ODD[2],
+            C.BG_ROW_ODD[3], C.BG_ROW_ODD[4])
     end
 end
 
-local GROUP_BG = {0.12, 0.12, 0.22, 1}
+-- Group / realm header row background
+local function GetGroupBG() return unpack(AltTracker.C.BG_GROUP) end
 
 ------------------------------------------------------------
 -- Scrollable row  (receives only the non-frozen columns)
@@ -403,14 +531,21 @@ function AltTracker.CreateRow(parent, height, columns)
     row.cells    = {}
     row.repTips  = {}
     row.gearTips = {}
-    row.cellTips = {}   -- general per-cell tooltip buttons
+    row.cellTips = {}
 
+    -- Base alternating background
     row.bg = row:CreateTexture(nil,"BACKGROUND")
     row.bg:SetAllPoints()
 
+    -- Class-colour tint (layered above bg at low alpha)
+    row.classTint = row:CreateTexture(nil,"ARTWORK")
+    row.classTint:SetAllPoints()
+    row.classTint:SetColorTexture(0,0,0,0)  -- invisible until a char is rendered
+
+    -- Hover highlight
     row.hover = row:CreateTexture(nil,"HIGHLIGHT")
     row.hover:SetAllPoints()
-    row.hover:SetColorTexture(1,1,1,0.06)
+    row.hover:SetColorTexture(1,1,1,0.05)
 
     local x=10; local padding=6
     for i, col in ipairs(columns) do
@@ -534,22 +669,64 @@ function AltTracker.CreateRow(parent, height, columns)
             div:SetSize(1,height-4)
             div:SetPoint("LEFT",x+col.width+math.floor(padding/2),0)
             div:SetColorTexture(unpack(DIVIDER_COLOR))
+            row.dividers = row.dividers or {}
+            table.insert(row.dividers, div)
         end
         x=x+col.width+padding
     end
     return row
 end
 
--- For a scrollable group row: just colour the background.
--- All text/buttons are in the frozen panel.
+-- For a scrollable group row: colour the background AND render the
+-- "(Account: <name>)" label that visually continues from the realm name in
+-- the frozen panel. The frozen scroll frame clips children at FROZEN_WIDTH,
+-- so the label can't be a single string spanning both panels — we split it
+-- intentionally. Together they read as one continuous "Dreamscythe (Account: Default)".
 function AltTracker.RenderGroupRow(row, item)
-    row.bg:SetColorTexture(unpack(GROUP_BG))
+    row.bg:SetColorTexture(GetGroupBG())
+    if row.classTint then row.classTint:SetColorTexture(0,0,0,0) end
     for _, cell in ipairs(row.cells) do cell:SetText("") end
+
+    -- Group row is a solid full-width band — column dividers must not paint
+    -- through it. RenderRow restores them for character rows.
+    if row.dividers then
+        for _, d in ipairs(row.dividers) do d:Hide() end
+    end
+
+    if not row.groupLabel then
+        local lbl = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        lbl:SetPoint("LEFT", row, "LEFT", 6, 0)
+        lbl:SetJustifyH("LEFT")
+        row.groupLabel = lbl
+    end
+    -- Account name is a placeholder until/unless the data model ever carries
+    -- a real account label. Color: dim gray for the parens, accent green for
+    -- the value, matching the approved mockup.
+    local accountName = (item.account ~= nil and tostring(item.account)) or "Default"
+    row.groupLabel:SetText(
+        "|cffaaaaaa(Account: |r"
+        .. "|cff66ff66" .. accountName .. "|r"
+        .. "|cffaaaaaa)|r"
+    )
+    row.groupLabel:Show()
     row:Show()
 end
 
 function AltTracker.RenderRow(row, char, index, columns)
     SetRowBg(row, index)
+    -- Pool reuse: a row that previously rendered as a group header may carry
+    -- a leftover groupLabel. Hide it so it doesn't bleed onto this char row.
+    if row.groupLabel then row.groupLabel:Hide() end
+    -- Pool reuse the other direction: dividers were hidden by RenderGroupRow,
+    -- restore them now since this is a regular character row.
+    if row.dividers then
+        for _, d in ipairs(row.dividers) do d:Show() end
+    end
+    -- Overlay a subtle class-colour tint on top of the base background
+    if row.classTint then
+        local r, g, b = AltTracker.GetClassRGB(char.class)
+        row.classTint:SetColorTexture(r, g, b, AltTracker.C.CLASS_TINT_ALPHA)
+    end
     for i, col in ipairs(columns) do
         local value = ""
         local tip   = row.cellTips[i]
@@ -634,7 +811,7 @@ function AltTracker.RenderRow(row, char, index, columns)
             end
 
         elseif col.field=="restPercent" or col.type=="restXP" then
-            local p   = char.restPercent or 0
+            local p   = ComputeLiveRestedPercent(char)
             local lvl = char.level or 0
             -- Gradient: 0%=red, 75%=yellow, 150%=green
             local r, g
@@ -647,22 +824,28 @@ function AltTracker.RenderRow(row, char, index, columns)
             end
             value = string.format("|cff%02x%02x00%d%%|r", math.floor(r*255), math.floor(g*255), p)
             if tip and lvl < 70 then
-                local restXP = char.restXP or 0
                 if p >= 150 then
                     tip.line1 = "Rested XP: " .. p .. "% (full)"
                     tip.line2 = nil; tip.line3 = nil
-                elseif restXP > 0 then
+                elseif p > 0 then
                     local needed  = 150 - p
-                    local hours   = math.ceil(needed / 5 * 8)
+                    -- Time to full depends on whether the character
+                    -- logged out in a rested zone.
+                    local perHour = (char.restedArea and 0.625) or 0.15625
+                    local hours   = math.ceil(needed / perHour)
                     local days    = math.floor(hours / 24)
                     local remHour = hours % 24
                     local timeStr = days > 0 and (days.."d "..remHour.."h") or (hours.."h")
                     tip.line1 = "Rested XP: " .. p .. "%"
-                    tip.line2 = "~" .. timeStr .. " offline to reach 150%"
+                    if char.restedArea then
+                        tip.line2 = "~" .. timeStr .. " offline to reach 150% (in inn/city)"
+                    else
+                        tip.line2 = "~" .. timeStr .. " offline to reach 150% (open world)"
+                    end
                     tip.line3 = nil
                 else
                     tip.line1 = "Rested XP: 0%"
-                    tip.line2 = "Log off in an inn to accumulate rested XP"
+                    tip.line2 = "Log off in an inn to accumulate faster"
                     tip.line3 = nil
                 end
             elseif tip then
@@ -781,6 +964,8 @@ end
 function AltTracker.HideRow(row)
     for _, cell in ipairs(row.cells) do cell:SetText("") end
     row.bg:SetColorTexture(0,0,0,0)
+    if row.classTint then row.classTint:SetColorTexture(0,0,0,0) end
+    if row.groupLabel then row.groupLabel:Hide() end
     row:Hide()
 end
 
@@ -795,15 +980,24 @@ function AltTracker.CreateFrozenRow(parent, height, nameColWidth)
     row.bg = row:CreateTexture(nil,"BACKGROUND")
     row.bg:SetAllPoints()
 
+    -- Class-colour tint (same as scrollable row)
+    row.classTint = row:CreateTexture(nil,"ARTWORK")
+    row.classTint:SetAllPoints()
+    row.classTint:SetColorTexture(0,0,0,0)
+
     row.hover = row:CreateTexture(nil,"HIGHLIGHT")
     row.hover:SetAllPoints()
-    row.hover:SetColorTexture(1,1,1,0.06)
+    row.hover:SetColorTexture(1,1,1,0.05)
 
-    local cBtn = CreateFrame("Button", nil, row)
-    cBtn:SetSize(16,16); cBtn:SetPoint("LEFT",6,0); cBtn:Hide()
+    local cBtn = CreateFrame("Button", nil, row, "BackdropTemplate")
+    cBtn:SetSize(18, 18); cBtn:SetPoint("LEFT", 8, 0); cBtn:Hide()
+    -- Subtle bordered box styling: a small dark panel that the +/- glyph
+    -- sits inside, matching the addon's overall flat dark look. Backdrop
+    -- is applied at render time so the addon's loaded ApplyBackdrop helper
+    -- is guaranteed to be available.
     row.collapseBtn = cBtn
-    local cIcon = cBtn:CreateFontString(nil,"OVERLAY","GameFontNormal")
-    cIcon:SetAllPoints(); cIcon:SetJustifyH("CENTER")
+    local cIcon = cBtn:CreateFontString(nil,"OVERLAY","GameFontHighlight")
+    cIcon:SetAllPoints(); cIcon:SetJustifyH("CENTER"); cIcon:SetJustifyV("MIDDLE")
     row.collapseIcon = cIcon
 
     local lbl = row:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
@@ -850,32 +1044,52 @@ function AltTracker.CreateFrozenRow(parent, height, nameColWidth)
 end
 
 function AltTracker.RenderFrozenGroupRow(row, item)
-    row.bg:SetColorTexture(unpack(GROUP_BG))
+    row.bg:SetColorTexture(GetGroupBG())
+    if row.classTint then row.classTint:SetColorTexture(0,0,0,0) end
     row.collapseBtn:Show()
-    row.collapseIcon:SetText(item.collapsed and "|cffffd100+|r" or "|cffffd100-|r")
 
-    -- Shift label right to make room for the button
-    row.nameLabel:SetPoint("LEFT", row.collapseBtn, "RIGHT", 4, 0)
+    -- Apply the bordered-box backdrop the first time we render this button.
+    -- Doing it here (not in CreateFrozenRow) keeps creation lean and lets
+    -- ApplyBackdrop be available — Theme.lua loads after RowRenderer.lua.
+    if not row._collapseStyled and AltTracker.ApplyBackdrop then
+        AltTracker.ApplyBackdrop(row.collapseBtn, 0.10, 0.10, 0.10, 1)
+        row._collapseStyled = true
+    end
+
+    -- Use proper unicode minus (en dash) for the expanded state — visually
+    -- balanced inside the box. Plus stays as ASCII.
+    row.collapseIcon:SetText(item.collapsed and "+" or "−")
+
+    -- Shift label right to make room for the button.
+    -- ClearAllPoints first because RenderFrozenCharRow may have anchored
+    -- this nameLabel directly to the row left edge in a previous render.
+    row.nameLabel:ClearAllPoints()
+    row.nameLabel:SetPoint("LEFT", row.collapseBtn, "RIGHT", 6, 0)
 
     local realm = item.realm
     row.collapseBtn:SetScript("OnClick", function()
         if AltTracker.ToggleRealm then AltTracker.ToggleRealm(realm) end
     end)
 
-    local GOLD_ICON_SS = "|TInterface\\MoneyFrame\\UI-GoldIcon:11:11:2:0|t"
-    local summary = "|cffaaaaaa"
-        ..(item.count or 0).."c  "
-        .."Lv "..(item.sumLevel or 0).."  "
-        ..math.floor((item.sumGold or 0)/10000)..GOLD_ICON_SS
-        .."|r"
-
-    row.nameLabel:SetText("|cffffd100"..(item.realm or "").."|r  "..summary)
+    -- Group row shows just the realm name in white, bold-ish. The character
+    -- count, total levels and total gold previously crammed into this label
+    -- are already displayed in the totals bar — duplicating them here just
+    -- made the row noisy and forced an unnecessary truncation in the
+    -- frozen Name column.
+    row.nameLabel:SetText("|cffffffff"..(item.realm or "").."|r")
     row:Show()
 end
 
 function AltTracker.RenderFrozenCharRow(row, char, index)
     SetRowBg(row, index)
+    if row.classTint then
+        local r, g, b = AltTracker.GetClassRGB(char.class)
+        row.classTint:SetColorTexture(r, g, b, AltTracker.C.CLASS_TINT_ALPHA)
+    end
     row.collapseBtn:Hide()
+    -- Pool reuse: clear any previous anchor (e.g. from RenderFrozenGroupRow
+    -- which anchors nameLabel to the collapse button) before re-anchoring.
+    row.nameLabel:ClearAllPoints()
     row.nameLabel:SetPoint("LEFT",10,0)
     row.nameLabel:SetText(AltTracker.ClassColor(char.class)..(char.name or "").."|r")
     if row.nameTipBtn then row.nameTipBtn.charData = char end
@@ -884,6 +1098,7 @@ end
 
 function AltTracker.HideFrozenRow(row)
     row.bg:SetColorTexture(0,0,0,0)
+    if row.classTint then row.classTint:SetColorTexture(0,0,0,0) end
     row.collapseBtn:Hide()
     row.nameLabel:SetText("")
     if row.nameTipBtn then row.nameTipBtn.charData = nil end

@@ -1,10 +1,11 @@
-## Interface: 20504
+## Interface: 20505
 ## Title: AltTracker
 ## Notes: Alt tracker
-## Author: You
-## Version: 3.0
+## Author: Spotnick
+## Version: 5.0
 ## SavedVariables: AltTrackerDB AltTrackerConfig
 
+Theme.lua
 Core.lua
 Scanner.lua
 Reputations.lua

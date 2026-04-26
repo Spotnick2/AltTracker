@@ -20,12 +20,9 @@ local function EnsureDefaults()
     AltTrackerConfig.syncMode      = AltTrackerConfig.syncMode      or "whisper"
     AltTrackerConfig.whitelist     = AltTrackerConfig.whitelist     or {}
     AltTrackerConfig.accountNumber = AltTrackerConfig.accountNumber or ""
-    -- Default: only send characters from the current account during sync.
-    -- Set to true to broadcast the entire DB (all accounts) instead.
     if AltTrackerConfig.sendAllAccounts == nil then
         AltTrackerConfig.sendAllAccounts = false
     end
-    -- Toast notifications for profession cooldowns
     if AltTrackerConfig.toastsEnabled == nil then
         AltTrackerConfig.toastsEnabled = true
     end
@@ -35,6 +32,11 @@ local function EnsureDefaults()
             Alchemy       = true,
             Jewelcrafting = true,
         }
+    end
+    -- Appearance defaults
+    AltTrackerConfig.theme = AltTrackerConfig.theme or "dark"
+    if AltTrackerConfig.scale == nil then
+        AltTrackerConfig.scale = 1.0
     end
 end
 
@@ -350,7 +352,99 @@ local function BuildPanel()
     end
 
     --------------------------------------------------------
-    -- Show/hide toggle button in top-right
+    -- Appearance: Theme + Scale
+    --------------------------------------------------------
+
+    local appearDivider = panel:CreateTexture(nil, "ARTWORK")
+    appearDivider:SetHeight(1)
+    appearDivider:SetPoint("TOPLEFT",  prevAnchor, "BOTTOMLEFT", -20, -16)
+    appearDivider:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, 0)
+    appearDivider:SetColorTexture(0.3, 0.3, 0.3, 1)
+
+    local appearHeader = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    appearHeader:SetPoint("TOPLEFT", appearDivider, "BOTTOMLEFT", 0, -10)
+    appearHeader:SetText("Appearance")
+
+    -- Theme label
+    local themeLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    themeLabel:SetPoint("TOPLEFT", appearHeader, "BOTTOMLEFT", 0, -14)
+    themeLabel:SetText("Theme")
+
+    -- Dark button
+    local themeDarkBtn = CreateFrame("Button", "AltTrackerConfigThemeDark", panel, "UIPanelButtonTemplate")
+    themeDarkBtn:SetSize(70, 22)
+    themeDarkBtn:SetPoint("LEFT", themeLabel, "RIGHT", 12, 0)
+    themeDarkBtn:SetText("Dark")
+
+    -- Class button
+    local themeClassBtn = CreateFrame("Button", "AltTrackerConfigThemeClass", panel, "UIPanelButtonTemplate")
+    themeClassBtn:SetSize(70, 22)
+    themeClassBtn:SetPoint("LEFT", themeDarkBtn, "RIGHT", 6, 0)
+    themeClassBtn:SetText("Class")
+
+    local themeHint = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+    themeHint:SetPoint("LEFT", themeClassBtn, "RIGHT", 10, 0)
+    themeHint:SetTextColor(0.6, 0.6, 0.6)
+    themeHint:SetText("Class uses your player class color as the UI accent")
+
+    local function RefreshThemeButtons()
+        local current = AltTrackerConfig.theme or "dark"
+        if current == "dark" then
+            themeDarkBtn:SetText("|cffffd100Dark|r")
+            themeClassBtn:SetText("Class")
+        else
+            themeDarkBtn:SetText("Dark")
+            themeClassBtn:SetText("|cffffd100Class|r")
+        end
+    end
+
+    themeDarkBtn:SetScript("OnClick", function()
+        AltTrackerConfig.theme = "dark"
+        RefreshThemeButtons()
+        AltTracker.ApplyTheme()
+    end)
+    themeClassBtn:SetScript("OnClick", function()
+        AltTrackerConfig.theme = "class"
+        RefreshThemeButtons()
+        AltTracker.ApplyTheme()
+    end)
+
+    -- Scale label + slider
+    local scaleLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    scaleLabel:SetPoint("TOPLEFT", themeLabel, "BOTTOMLEFT", 0, -18)
+    scaleLabel:SetText("Scale")
+
+    local scaleSlider = CreateFrame("Slider", "AltTrackerConfigScaleSlider", panel, "OptionsSliderTemplate")
+    scaleSlider:SetPoint("LEFT", scaleLabel, "RIGHT", 16, 0)
+    scaleSlider:SetWidth(180)
+    scaleSlider:SetHeight(16)
+    scaleSlider:SetMinMaxValues(0.75, 1.25)
+    scaleSlider:SetValueStep(0.05)
+    -- NOTE: SetObeyStepOnDrag does not exist in TBC Classic 2.5.x — omitted.
+    -- Hide the auto-generated Low/High labels
+    if _G["AltTrackerConfigScaleSliderLow"]  then _G["AltTrackerConfigScaleSliderLow"]:SetText("0.75")  end
+    if _G["AltTrackerConfigScaleSliderHigh"] then _G["AltTrackerConfigScaleSliderHigh"]:SetText("1.25") end
+
+    local scaleVal = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    scaleVal:SetPoint("LEFT", scaleSlider, "RIGHT", 10, 0)
+    scaleVal:SetWidth(36)
+    scaleVal:SetJustifyH("LEFT")
+
+    local function RefreshScaleDisplay()
+        local s = AltTrackerConfig.scale or 1.0
+        scaleSlider:SetValue(s)
+        scaleVal:SetText(string.format("%.2f", s))
+    end
+
+    scaleSlider:SetScript("OnValueChanged", function(self, value)
+        -- round to nearest step
+        local rounded = math.floor(value / 0.05 + 0.5) * 0.05
+        scaleVal:SetText(string.format("%.2f", rounded))
+        AltTracker.SetScale(rounded)
+    end)
+
+    --------------------------------------------------------
+    -- Show/hide: refresh all controls on open
     --------------------------------------------------------
 
     panel:SetScript("OnShow", function()
@@ -362,6 +456,8 @@ local function BuildPanel()
             cb:SetChecked(AltTrackerConfig.toastProfessions[profKey] ~= false)
         end
         RefreshList()
+        RefreshThemeButtons()
+        RefreshScaleDisplay()
     end)
 
     panel:Hide()
