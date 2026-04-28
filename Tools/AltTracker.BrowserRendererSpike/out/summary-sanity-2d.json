@@ -1,0 +1,21 @@
+[
+  {
+    "runId": "sanity-2d-headless-default",
+    "ok": true,
+    "renderReady": true,
+    "renderError": "",
+    "renderStatus": "ready",
+    "actorCount": 0,
+    "canvasCount": 1,
+    "sample2D": [
+      124,
+      255,
+      0,
+      255
+    ],
+    "sampleWebGl": null,
+    "canvasDataUrlLength": 23378,
+    "statusErrors": 0,
+    "requestFailures": 0
+  }
+]

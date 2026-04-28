@@ -1,7 +1,9 @@
 ------------------------------------------------------------
 -- AltTracker Config
--- Registers an addon config panel in Interface → AddOns.
--- Stores everything in AltTrackerConfig (SavedVariable).
+-- Owns the SavedVariable defaults and exposes the public config API
+-- (whitelist mutation, defaults init). The standalone config popup
+-- has been removed — all settings now live in the in-window Options
+-- section (open via /alts config or the minimap right-click).
 --
 -- Settings:
 --   syncMode   : "guild" | "whisper"
@@ -38,6 +40,80 @@ local function EnsureDefaults()
     if AltTrackerConfig.scale == nil then
         AltTrackerConfig.scale = 1.0
     end
+
+    -- World camera presentation defaults (live player only).
+    -- NOTE: We deliberately do NOT default `worldCameraShoulderOffset` or
+    -- `worldCameraPitchOffset` -- the minimal Classic-safe controller does not
+    -- touch `test_cameraOverShoulder` (it would trip Blizzard's experimental
+    -- ActionCam popup) or pitch CVars. Old saved values are harmless.
+    if AltTrackerConfig.enableWorldCameraPresentation == nil then
+        AltTrackerConfig.enableWorldCameraPresentation = true
+    end
+    if AltTrackerConfig.worldCameraPresentationDebug == nil then
+        AltTrackerConfig.worldCameraPresentationDebug = false
+    end
+    if AltTrackerConfig.worldCameraEnterDuration == nil then
+        AltTrackerConfig.worldCameraEnterDuration = 0.60
+    end
+    if AltTrackerConfig.worldCameraExitDuration == nil then
+        AltTrackerConfig.worldCameraExitDuration = 0.45
+    end
+    -- Migration: any zoom below ~7.0 frames the camera too close. With the
+    -- single-call zoom strategy plus the temporary cameraDistanceMaxZoomFactor
+    -- bump, the new default of 8.5 reliably places the character outside the
+    -- addon footprint. Catches all legacy defaults (2.20 / 2.35 / 4.5 / 6.5).
+    do
+        local zp = tonumber(AltTrackerConfig.worldCameraZoomPreset)
+        if zp and zp < 7.0 then
+            AltTrackerConfig.worldCameraZoomPreset = nil
+        end
+    end
+    if AltTrackerConfig.worldCameraZoomPreset == nil then
+        AltTrackerConfig.worldCameraZoomPreset = 8.5
+    end
+    if AltTrackerConfig.worldCameraYawOffset == nil then
+        AltTrackerConfig.worldCameraYawOffset = -0.22
+    end
+    if AltTrackerConfig.worldCameraYawDegrees == nil then
+        -- A small swing (60deg) rather than a full half-rotation; matches
+        -- Narcissus's "settle into pose" feel instead of a spin.
+        AltTrackerConfig.worldCameraYawDegrees = 60
+    end
+    if AltTrackerConfig.worldCameraSavedViewSlot == nil then
+        AltTrackerConfig.worldCameraSavedViewSlot = 5
+    end
+    -- Lateral character placement: multiplier applied on top of Narcissus's
+    -- per-race shoulder offset formula (zoom * factor1 + factor2). Higher
+    -- pushes the character further LEFT on screen, making more room for
+    -- the AltTracker window on the right. 1.0 = Narcissus default.
+    if AltTrackerConfig.worldCameraShoulderMult == nil then
+        AltTrackerConfig.worldCameraShoulderMult = 1.0
+    end
+    -- Continuous slow orbit (Narcissus-style "spinning room" effect): keeps
+    -- a tiny MoveViewRightStart running for the whole time AltTracker is
+    -- open, so the world rotates around the centered player.
+    if AltTrackerConfig.worldCameraContinuousOrbit == nil then
+        AltTrackerConfig.worldCameraContinuousOrbit = true
+    end
+    if AltTrackerConfig.worldCameraOrbitSpeed == nil then
+        -- Matches Narcissus's ZoomFactor.toSpeed; slow enough to be ambient,
+        -- fast enough to be visible. Tweak with /run AltTrackerConfig.worldCameraOrbitSpeed = N
+        AltTrackerConfig.worldCameraOrbitSpeed = 0.005
+    end
+
+    -- Open-window UX defaults
+    if AltTrackerConfig.enableOpenAnimation == nil then
+        AltTrackerConfig.enableOpenAnimation = true
+    end
+
+    -- Minimap button (LibDBIcon-free; angle-around-minimap persistence)
+    AltTrackerConfig.minimapButton = AltTrackerConfig.minimapButton or {}
+    if AltTrackerConfig.minimapButton.hide == nil then
+        AltTrackerConfig.minimapButton.hide = false
+    end
+    if AltTrackerConfig.minimapButton.angle == nil then
+        AltTrackerConfig.minimapButton.angle = 200 -- lower-left default
+    end
 end
 
 ------------------------------------------------------------
@@ -73,406 +149,23 @@ AltTracker.AddToWhitelist   = AddToWhitelist
 AltTracker.RemoveFromWhitelist = RemoveFromWhitelist
 AltTracker.EnsureConfigDefaults = EnsureDefaults
 
-------------------------------------------------------------
--- Panel frame
-------------------------------------------------------------
-
-local panel
-local listRows = {}
-local LIST_ROW_HEIGHT = 18
-local LIST_VISIBLE    = 12
-
-local function RefreshList()
-    local wl = AltTrackerConfig.whitelist
-    for i, row in ipairs(listRows) do
-        local name = wl[i]
-        if name then
-            row.label:SetText(name)
-            row.removeBtn:Show()
-            row:Show()
-        else
-            row:Hide()
-        end
-    end
-end
-
-local function BuildPanel()
-    if panel then return end
-    EnsureDefaults()
-
-    panel = CreateFrame("Frame", "AltTrackerConfigPanel", UIParent, "BackdropTemplate")
-    panel.name = "AltTracker"
-    panel:SetSize(520, 680)
-    panel:SetPoint("CENTER")
-    panel:SetFrameStrata("DIALOG")
-    panel:SetToplevel(true)
-    panel:SetMovable(true)
-    panel:EnableMouse(true)
-    panel:RegisterForDrag("LeftButton")
-    panel:SetScript("OnDragStart", panel.StartMoving)
-    panel:SetScript("OnDragStop",  panel.StopMovingOrSizing)
-    panel:SetBackdrop({
-        bgFile   = "Interface/Tooltips/UI-Tooltip-Background",
-        edgeFile = "Interface/DialogFrame/UI-DialogBox-Border",
-        tile=true, tileSize=16, edgeSize=32,
-        insets={left=8,right=8,top=8,bottom=8},
-    })
-    panel:SetBackdropColor(0.05, 0.05, 0.08, 0.97)
-    tinsert(UISpecialFrames, "AltTrackerConfigPanel")  -- Esc closes it
-
-    local closeBtn = CreateFrame("Button", nil, panel, "UIPanelCloseButton")
-    closeBtn:SetPoint("TOPRIGHT", -5, -5)
-
-    --------------------------------------------------------
-    -- Title
-    --------------------------------------------------------
-
-    local title = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
-    title:SetPoint("TOPLEFT", 16, -16)
-    title:SetText("AltTracker")
-
-    local subtitle = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    subtitle:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -4)
-    subtitle:SetTextColor(0.7, 0.7, 0.7)
-    subtitle:SetText("Alt character tracking and sync")
-
-    local divider = panel:CreateTexture(nil, "ARTWORK")
-    divider:SetHeight(1)
-    divider:SetPoint("TOPLEFT",  subtitle, "BOTTOMLEFT",  0, -10)
-    divider:SetPoint("TOPRIGHT", panel,    "TOPRIGHT",  -16, -52)
-    divider:SetColorTexture(0.3, 0.3, 0.3, 1)
-
-    --------------------------------------------------------
-    -- Account number
-    --------------------------------------------------------
-
-    local acctLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    acctLabel:SetPoint("TOPLEFT", divider, "BOTTOMLEFT", 0, -16)
-    acctLabel:SetText("Account Number")
-
-    local acctBox = CreateFrame("EditBox", "AltTrackerConfigAcctBox", panel, "InputBoxTemplate")
-    acctBox:SetSize(60, 20)
-    acctBox:SetPoint("LEFT", acctLabel, "RIGHT", 12, 0)
-    acctBox:SetAutoFocus(false)
-    acctBox:SetMaxLetters(3)
-    acctBox:SetNumeric(true)
-    acctBox:SetText(tostring(AltTrackerConfig.accountNumber or ""))
-    acctBox:SetScript("OnEnterPressed", function(self)
-        AltTrackerConfig.accountNumber = tonumber(self:GetText()) or ""
-        self:ClearFocus()
-    end)
-    acctBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-
-    local acctHint = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
-    acctHint:SetPoint("LEFT", acctBox, "RIGHT", 8, 0)
-    acctHint:SetTextColor(0.6, 0.6, 0.6)
-    acctHint:SetText("Used in exports to identify which WoW account a char belongs to")
-
-    --------------------------------------------------------
-    -- Send scope checkbox
-    --------------------------------------------------------
-
-    local sendAllCheck = CreateFrame("CheckButton", "AltTrackerConfigSendAll", panel, "UICheckButtonTemplate")
-    sendAllCheck:SetSize(26, 26)
-    sendAllCheck:SetPoint("TOPLEFT", acctLabel, "BOTTOMLEFT", -2, -10)
-    sendAllCheck:SetChecked(AltTrackerConfig.sendAllAccounts or false)
-    sendAllCheck:SetScript("OnClick", function(self)
-        AltTrackerConfig.sendAllAccounts = self:GetChecked() and true or false
-    end)
-
-    local sendAllLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    sendAllLabel:SetPoint("LEFT", sendAllCheck, "RIGHT", 4, 0)
-    sendAllLabel:SetText("Send all accounts when syncing")
-
-    local sendAllHint = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
-    sendAllHint:SetPoint("LEFT", sendAllLabel, "RIGHT", 10, 0)
-    sendAllHint:SetTextColor(0.6, 0.6, 0.6)
-    sendAllHint:SetText("Default: only send characters from this account")
-
-    --------------------------------------------------------
-    -- Whitelist section header
-    --------------------------------------------------------
-
-    local wlHeader = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    wlHeader:SetPoint("TOPLEFT", sendAllCheck, "BOTTOMLEFT", 2, -14)
-    wlHeader:SetText("Sync Whitelist")
-
-    local wlHint = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
-    wlHint:SetPoint("LEFT", wlHeader, "RIGHT", 10, 0)
-    wlHint:SetTextColor(0.6, 0.6, 0.6)
-    wlHint:SetText("Characters on your other WoW accounts to sync with (Name or Name-Realm)")
-
-    --------------------------------------------------------
-    -- Add character row
-    --------------------------------------------------------
-
-    local addBox = CreateFrame("EditBox", "AltTrackerConfigAddBox", panel, "InputBoxTemplate")
-    addBox:SetSize(180, 20)
-    addBox:SetPoint("TOPLEFT", wlHeader, "BOTTOMLEFT", 0, -10)
-    addBox:SetAutoFocus(false)
-    addBox:SetMaxLetters(60)
-    addBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-
-    local addBtn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-    addBtn:SetSize(80, 22)
-    addBtn:SetPoint("LEFT", addBox, "RIGHT", 8, 0)
-    addBtn:SetText("Add")
-    addBtn:SetScript("OnClick", function()
-        local name = strtrim(addBox:GetText())
-        if name == "" then return end
-        if AddToWhitelist(name) then
-            addBox:SetText("")
-            RefreshList()
-        end
-    end)
-    addBox:SetScript("OnEnterPressed", function(self)
-        addBtn:Click()
-        self:ClearFocus()
-    end)
-
-    -- "Add current character" convenience button
-    local addSelfBtn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-    addSelfBtn:SetSize(140, 22)
-    addSelfBtn:SetPoint("LEFT", addBtn, "RIGHT", 6, 0)
-    addSelfBtn:SetText("Add This Character")
-    addSelfBtn:SetScript("OnClick", function()
-        local name = UnitName("player")
-        local realm = GetRealmName()
-        if name and realm then
-            local full = name .. "-" .. realm
-            if AddToWhitelist(full) then RefreshList() end
-        end
-    end)
-
-    --------------------------------------------------------
-    -- Scrollable whitelist
-    --------------------------------------------------------
-
-    local listFrame = CreateFrame("Frame", nil, panel, "BackdropTemplate")
-    listFrame:SetPoint("TOPLEFT", addBox, "BOTTOMLEFT", 0, -10)
-    listFrame:SetSize(420, LIST_ROW_HEIGHT * LIST_VISIBLE + 4)
-    listFrame:SetBackdrop({
-        bgFile = "Interface/Tooltips/UI-Tooltip-Background",
-        edgeFile = "Interface/Buttons/WHITE8X8",
-        tile = true, tileSize = 8, edgeSize = 1,
-    })
-    listFrame:SetBackdropColor(0.05, 0.05, 0.07, 0.9)
-    listFrame:SetBackdropBorderColor(0.3, 0.3, 0.35, 1)
-
-    for i = 1, LIST_VISIBLE do
-        local row = CreateFrame("Frame", nil, listFrame)
-        row:SetSize(420, LIST_ROW_HEIGHT)
-        row:SetPoint("TOPLEFT", listFrame, "TOPLEFT", 0, -((i - 1) * LIST_ROW_HEIGHT) - 2)
-
-        -- Alternating background
-        local bg = row:CreateTexture(nil, "BACKGROUND")
-        bg:SetAllPoints()
-        if i % 2 == 0 then
-            bg:SetColorTexture(0.10, 0.10, 0.14, 0.5)
-        else
-            bg:SetColorTexture(0.06, 0.06, 0.10, 0.5)
-        end
-
-        local lbl = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        lbl:SetPoint("LEFT", 8, 0)
-        lbl:SetWidth(340)
-        lbl:SetJustifyH("LEFT")
-        row.label = lbl
-
-        local removeBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-        removeBtn:SetSize(58, 16)
-        removeBtn:SetPoint("RIGHT", row, "RIGHT", -4, 0)
-        removeBtn:SetText("Remove")
-        removeBtn:SetScript("OnClick", function()
-            local name = lbl:GetText()
-            if RemoveFromWhitelist(name) then RefreshList() end
-        end)
-        row.removeBtn = removeBtn
-
-        listRows[i] = row
-    end
-
-    --------------------------------------------------------
-    -- Cooldown Toast Notifications
-    --------------------------------------------------------
-
-    local toastDivider = panel:CreateTexture(nil, "ARTWORK")
-    toastDivider:SetHeight(1)
-    toastDivider:SetPoint("TOPLEFT",  listFrame, "BOTTOMLEFT",  0, -16)
-    toastDivider:SetPoint("TOPRIGHT", panel,     "TOPRIGHT",  -16, 0)
-    toastDivider:SetColorTexture(0.3, 0.3, 0.3, 1)
-
-    local toastHeader = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    toastHeader:SetPoint("TOPLEFT", toastDivider, "BOTTOMLEFT", 0, -10)
-    toastHeader:SetText("Cooldown Notifications")
-
-    local toastHint = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
-    toastHint:SetPoint("LEFT", toastHeader, "RIGHT", 10, 0)
-    toastHint:SetTextColor(0.6, 0.6, 0.6)
-    toastHint:SetText("Show a toast when a profession cooldown expires")
-
-    -- Master toggle
-    local toastMasterCheck = CreateFrame("CheckButton", "AltTrackerConfigToastMaster", panel, "UICheckButtonTemplate")
-    toastMasterCheck:SetSize(26, 26)
-    toastMasterCheck:SetPoint("TOPLEFT", toastHeader, "BOTTOMLEFT", -2, -8)
-    toastMasterCheck:SetChecked(AltTrackerConfig.toastsEnabled ~= false)
-    toastMasterCheck:SetScript("OnClick", function(self)
-        AltTrackerConfig.toastsEnabled = self:GetChecked() and true or false
-    end)
-
-    local toastMasterLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    toastMasterLabel:SetPoint("LEFT", toastMasterCheck, "RIGHT", 4, 0)
-    toastMasterLabel:SetText("Enable cooldown toast notifications")
-
-    -- Per-profession toggles
-    local TOAST_PROFS = {
-        { key = "Tailoring",     label = "Tailoring (Mooncloth, Shadowcloth, Spellcloth)" },
-        { key = "Alchemy",       label = "Alchemy (Transmute)" },
-        { key = "Jewelcrafting", label = "Jewelcrafting (Brilliant Glass)" },
-    }
-
-    local profChecks = {}
-    local prevAnchor = toastMasterCheck
-
-    for _, prof in ipairs(TOAST_PROFS) do
-        local cb = CreateFrame("CheckButton", "AltTrackerConfigToast_" .. prof.key, panel, "UICheckButtonTemplate")
-        cb:SetSize(26, 26)
-        cb:SetPoint("TOPLEFT", prevAnchor, "BOTTOMLEFT", (prevAnchor == toastMasterCheck) and 20 or 0, -2)
-        cb:SetChecked(AltTrackerConfig.toastProfessions[prof.key] ~= false)
-        cb:SetScript("OnClick", function(self)
-            AltTrackerConfig.toastProfessions[prof.key] = self:GetChecked() and true or false
-        end)
-
-        local lbl = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-        lbl:SetPoint("LEFT", cb, "RIGHT", 4, 0)
-        lbl:SetText(prof.label)
-
-        profChecks[prof.key] = cb
-        prevAnchor = cb
-    end
-
-    --------------------------------------------------------
-    -- Appearance: Theme + Scale
-    --------------------------------------------------------
-
-    local appearDivider = panel:CreateTexture(nil, "ARTWORK")
-    appearDivider:SetHeight(1)
-    appearDivider:SetPoint("TOPLEFT",  prevAnchor, "BOTTOMLEFT", -20, -16)
-    appearDivider:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, 0)
-    appearDivider:SetColorTexture(0.3, 0.3, 0.3, 1)
-
-    local appearHeader = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    appearHeader:SetPoint("TOPLEFT", appearDivider, "BOTTOMLEFT", 0, -10)
-    appearHeader:SetText("Appearance")
-
-    -- Theme label
-    local themeLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    themeLabel:SetPoint("TOPLEFT", appearHeader, "BOTTOMLEFT", 0, -14)
-    themeLabel:SetText("Theme")
-
-    -- Dark button
-    local themeDarkBtn = CreateFrame("Button", "AltTrackerConfigThemeDark", panel, "UIPanelButtonTemplate")
-    themeDarkBtn:SetSize(70, 22)
-    themeDarkBtn:SetPoint("LEFT", themeLabel, "RIGHT", 12, 0)
-    themeDarkBtn:SetText("Dark")
-
-    -- Class button
-    local themeClassBtn = CreateFrame("Button", "AltTrackerConfigThemeClass", panel, "UIPanelButtonTemplate")
-    themeClassBtn:SetSize(70, 22)
-    themeClassBtn:SetPoint("LEFT", themeDarkBtn, "RIGHT", 6, 0)
-    themeClassBtn:SetText("Class")
-
-    local themeHint = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
-    themeHint:SetPoint("LEFT", themeClassBtn, "RIGHT", 10, 0)
-    themeHint:SetTextColor(0.6, 0.6, 0.6)
-    themeHint:SetText("Class uses your player class color as the UI accent")
-
-    local function RefreshThemeButtons()
-        local current = AltTrackerConfig.theme or "dark"
-        if current == "dark" then
-            themeDarkBtn:SetText("|cffffd100Dark|r")
-            themeClassBtn:SetText("Class")
-        else
-            themeDarkBtn:SetText("Dark")
-            themeClassBtn:SetText("|cffffd100Class|r")
-        end
-    end
-
-    themeDarkBtn:SetScript("OnClick", function()
-        AltTrackerConfig.theme = "dark"
-        RefreshThemeButtons()
-        AltTracker.ApplyTheme()
-    end)
-    themeClassBtn:SetScript("OnClick", function()
-        AltTrackerConfig.theme = "class"
-        RefreshThemeButtons()
-        AltTracker.ApplyTheme()
-    end)
-
-    -- Scale label + slider
-    local scaleLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    scaleLabel:SetPoint("TOPLEFT", themeLabel, "BOTTOMLEFT", 0, -18)
-    scaleLabel:SetText("Scale")
-
-    local scaleSlider = CreateFrame("Slider", "AltTrackerConfigScaleSlider", panel, "OptionsSliderTemplate")
-    scaleSlider:SetPoint("LEFT", scaleLabel, "RIGHT", 16, 0)
-    scaleSlider:SetWidth(180)
-    scaleSlider:SetHeight(16)
-    scaleSlider:SetMinMaxValues(0.75, 1.25)
-    scaleSlider:SetValueStep(0.05)
-    -- NOTE: SetObeyStepOnDrag does not exist in TBC Classic 2.5.x — omitted.
-    -- Hide the auto-generated Low/High labels
-    if _G["AltTrackerConfigScaleSliderLow"]  then _G["AltTrackerConfigScaleSliderLow"]:SetText("0.75")  end
-    if _G["AltTrackerConfigScaleSliderHigh"] then _G["AltTrackerConfigScaleSliderHigh"]:SetText("1.25") end
-
-    local scaleVal = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    scaleVal:SetPoint("LEFT", scaleSlider, "RIGHT", 10, 0)
-    scaleVal:SetWidth(36)
-    scaleVal:SetJustifyH("LEFT")
-
-    local function RefreshScaleDisplay()
-        local s = AltTrackerConfig.scale or 1.0
-        scaleSlider:SetValue(s)
-        scaleVal:SetText(string.format("%.2f", s))
-    end
-
-    scaleSlider:SetScript("OnValueChanged", function(self, value)
-        -- round to nearest step
-        local rounded = math.floor(value / 0.05 + 0.5) * 0.05
-        scaleVal:SetText(string.format("%.2f", rounded))
-        AltTracker.SetScale(rounded)
-    end)
-
-    --------------------------------------------------------
-    -- Show/hide: refresh all controls on open
-    --------------------------------------------------------
-
-    panel:SetScript("OnShow", function()
-        EnsureDefaults()
-        acctBox:SetText(tostring(AltTrackerConfig.accountNumber or ""))
-        sendAllCheck:SetChecked(AltTrackerConfig.sendAllAccounts or false)
-        toastMasterCheck:SetChecked(AltTrackerConfig.toastsEnabled ~= false)
-        for profKey, cb in pairs(profChecks) do
-            cb:SetChecked(AltTrackerConfig.toastProfessions[profKey] ~= false)
-        end
-        RefreshList()
-        RefreshThemeButtons()
-        RefreshScaleDisplay()
-    end)
-
-    panel:Hide()
-end
 
 ------------------------------------------------------------
--- Public: open/close config window
+-- Backwards-compat: the standalone config popup has been replaced by
+-- the in-window Options section (sidebar -> Options). Keep the public
+-- API surface so /alts config and the minimap right-click still work.
+-- AltTracker.OpenConfig() now opens the AltTracker sheet on the Options
+-- section directly, instead of building its own popup.
 ------------------------------------------------------------
 
 function AltTracker.OpenConfig()
-    BuildPanel()
-    if panel:IsShown() then
-        panel:Hide()
-    else
-        panel:Show()
+    if AltTracker.EnsureSheetVisible then
+        AltTracker.EnsureSheetVisible()
+    elseif AltTracker.ShowSheet then
+        AltTracker.ShowSheet()
+    end
+    if AltTracker._SwitchToOptions then
+        AltTracker._SwitchToOptions()
     end
 end
 
@@ -484,5 +177,4 @@ local initFrame = CreateFrame("Frame")
 initFrame:RegisterEvent("PLAYER_LOGIN")
 initFrame:SetScript("OnEvent", function()
     EnsureDefaults()
-    BuildPanel()
 end)

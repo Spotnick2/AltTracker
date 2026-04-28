@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>2D Sanity</title>
+  <style>
+    html, body { margin: 0; padding: 0; background: #1f1f1f; color: #fff; font-family: Segoe UI, Tahoma, sans-serif; }
+    #stage { width: 512px; height: 512px; margin: 16px; border: 3px solid #fff; background: #111; position: relative; }
+    #status { position: absolute; left: 8px; bottom: 8px; background: rgba(0,0,0,0.7); border: 1px solid #0f0; padding: 4px 8px; }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="c2d" width="512" height="512"></canvas>
+    <div id="status">status: boot</div>
+  </div>
+  <script>
+    const c = document.getElementById("c2d");
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = "#ff007a";
+    ctx.fillRect(0, 0, 512, 512);
+    ctx.fillStyle = "#00e5ff";
+    ctx.fillRect(50, 50, 412, 140);
+    ctx.fillStyle = "#111";
+    ctx.font = "bold 44px Segoe UI";
+    ctx.fillText("2D SANITY", 130, 140);
+    ctx.beginPath();
+    ctx.arc(256, 320, 100, 0, Math.PI * 2);
+    ctx.fillStyle = "#7cff00";
+    ctx.fill();
+    window.__renderReady = true;
+    window.__renderError = "";
+    window.__renderStatus = "ready";
+    document.getElementById("status").textContent = "status: ready";
+  </script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "name": "alttracker-browser-renderer-spike",
+  "version": "0.1.0",
+  "private": true,
+  "description": "POC for browser-based WoW character rendering screenshots",
+  "type": "module",
+  "scripts": {
+    "spike:capture": "node capture.mjs",
+    "spike:capture:headed": "node capture.mjs --headed",
+    "spike:capture:matrix": "node capture.mjs --matrix",
+    "spike:sanity:2d": "node capture.mjs --page sanity-2d",
+    "spike:sanity:webgl": "node capture.mjs --page sanity-webgl"
+  },
+  "dependencies": {
+    "playwright": "^1.54.2"
+  }
+}

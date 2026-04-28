@@ -206,6 +206,7 @@ local function SerializeChar(c)
     for k,v in pairs(c) do
         if type(v) ~= "table"
         and not k:find("^gearlink_")   -- item links are local-only (too large for sync)
+                                      -- gearid_* stays included (compact + sync-safe)
         and k ~= "specIcon"            -- numeric fileID, client-specific
         then
             parts[#parts+1] = k .. ":" .. tostring(v)

@@ -1,0 +1,13 @@
+{
+  "name": "alttracker-heroshot-chatgpt",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "ChatGPT browser automation for AltTracker hero shot generation",
+  "scripts": {
+    "extract-cookies": "node extract-cookies.mjs",
+    "generate": "node generate.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.44.0"
+  }
+}

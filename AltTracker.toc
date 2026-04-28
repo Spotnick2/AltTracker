@@ -6,6 +6,7 @@
 ## SavedVariables: AltTrackerDB AltTrackerConfig
 
 Theme.lua
+AltTrackerRenderManifest.lua
 Core.lua
 Scanner.lua
 Reputations.lua

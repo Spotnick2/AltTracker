@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebGL Sanity</title>
+  <style>
+    html, body { margin: 0; padding: 0; background: #1f1f1f; color: #fff; font-family: Segoe UI, Tahoma, sans-serif; }
+    #stage { width: 512px; height: 512px; margin: 16px; border: 3px solid #fff; background: #111; position: relative; }
+    #status { position: absolute; left: 8px; bottom: 8px; background: rgba(0,0,0,0.7); border: 1px solid #0f0; padding: 4px 8px; }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="glc" width="512" height="512"></canvas>
+    <div id="status">status: boot</div>
+  </div>
+  <script>
+    window.__renderReady = false;
+    window.__renderError = "";
+    window.__renderStatus = "initializing";
+    const canvas = document.getElementById("glc");
+    try {
+      const gl = canvas.getContext("webgl", { preserveDrawingBuffer: true }) ||
+        canvas.getContext("experimental-webgl", { preserveDrawingBuffer: true });
+      if (!gl) throw new Error("WebGL context unavailable");
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.clearColor(0.1, 0.7, 0.2, 1.0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      const px = new Uint8Array(4);
+      gl.readPixels(256, 256, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      window.__sanitySample = Array.from(px);
+      window.__renderReady = true;
+      window.__renderStatus = "ready";
+      document.getElementById("status").textContent = "status: ready";
+    } catch (e) {
+      window.__renderError = e?.message || String(e);
+      window.__renderStatus = "error";
+      document.getElementById("status").textContent = "status: error";
+    }
+  </script>
+</body>
+</html>

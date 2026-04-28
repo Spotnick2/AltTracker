@@ -47,6 +47,174 @@ local function Round2(value)
     return math.floor((tonumber(value) or 0) * 100 + 0.5) / 100
 end
 
+local function ItemIDFromLink(link)
+    if type(link) ~= "string" then return 0 end
+    local id = link:match("item:(%d+)")
+    return tonumber(id) or 0
+end
+
+local function ReadPlayerDisplayID()
+    local id
+
+    if type(C_PlayerInfo) == "table" and type(C_PlayerInfo.GetDisplayID) == "function" then
+        local ok, value = pcall(C_PlayerInfo.GetDisplayID, "player")
+        if ok then
+            id = tonumber(value)
+            if id and id > 0 then return id end
+        end
+        ok, value = pcall(C_PlayerInfo.GetDisplayID)
+        if ok then
+            id = tonumber(value)
+            if id and id > 0 then return id end
+        end
+    end
+
+    if type(UnitDisplayID) == "function" then
+        local ok, value = pcall(UnitDisplayID, "player")
+        if ok then
+            id = tonumber(value)
+            if id and id > 0 then return id end
+        end
+    end
+
+    if type(GetPlayerModelDisplayInfo) == "function" then
+        local ok, value = pcall(GetPlayerModelDisplayInfo)
+        if ok then
+            id = tonumber(value)
+            if id and id > 0 then return id end
+        end
+    end
+
+    return 0
+end
+
+local modelPathProbeFrame
+local modelPathRetryScheduled = false
+
+local function EnsureModelPathProbeFrame()
+    if modelPathProbeFrame then
+        return modelPathProbeFrame
+    end
+    if type(CreateFrame) ~= "function" then
+        return nil
+    end
+    local parent = UIParent or WorldFrame
+    if not parent then
+        return nil
+    end
+
+    local frame = CreateFrame("PlayerModel", nil, parent)
+    if not frame then
+        local ok
+        ok, frame = pcall(CreateFrame, "DressUpModel", nil, parent)
+        if not ok then
+            frame = nil
+        end
+    end
+    if not frame then
+        return nil
+    end
+
+    frame:SetSize(1, 1)
+    frame:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, 0)
+    frame:Hide()
+    modelPathProbeFrame = frame
+    return modelPathProbeFrame
+end
+
+local function PrimeProbeForPlayerModelPath()
+    local probe = EnsureModelPathProbeFrame()
+    if not probe or type(probe.SetUnit) ~= "function" then
+        return nil
+    end
+
+    if type(probe.ClearModel) == "function" then
+        pcall(probe.ClearModel, probe)
+    end
+    if type(probe.Show) == "function" then
+        probe:Show()
+    end
+
+    local ok = pcall(probe.SetUnit, probe, "player")
+    if not ok then
+        if type(probe.Hide) == "function" then
+            probe:Hide()
+        end
+        return nil
+    end
+    return probe
+end
+
+local function ReadModelPathFromProbe(probe)
+    if not probe or type(probe.GetModel) ~= "function" then
+        return ""
+    end
+    local okModel, modelPath = pcall(probe.GetModel, probe)
+    if okModel and type(modelPath) == "string" and modelPath ~= "" then
+        return modelPath
+    end
+    return ""
+end
+
+local function ReadPlayerModelPathFromProbe()
+    local probe = PrimeProbeForPlayerModelPath()
+    if not probe then
+        return ""
+    end
+
+    local modelPath = ReadModelPathFromProbe(probe)
+    if type(probe.Hide) == "function" then
+        probe:Hide()
+    end
+    return modelPath
+end
+
+local function ReadPlayerModelPath()
+    if type(UnitModel) == "function" then
+        local ok, value = pcall(UnitModel, "player")
+        if ok and type(value) == "string" and value ~= "" then
+            return value
+        end
+    end
+    return ReadPlayerModelPathFromProbe()
+end
+
+local function QueueModelPathRetry(guid)
+    if modelPathRetryScheduled then return end
+    if type(C_Timer) ~= "table" or type(C_Timer.After) ~= "function" then return end
+
+    local probe = PrimeProbeForPlayerModelPath()
+    if not probe then
+        return
+    end
+
+    modelPathRetryScheduled = true
+    C_Timer.After(0.3, function()
+        modelPathRetryScheduled = false
+
+        local modelPath = ReadModelPathFromProbe(probe)
+        if type(probe.Hide) == "function" then
+            probe:Hide()
+        end
+        if modelPath == "" then
+            return
+        end
+
+        local char = AltTrackerDB and AltTrackerDB[guid]
+        if not char then
+            return
+        end
+        if char.modelPath == modelPath then
+            return
+        end
+
+        char.modelPath = modelPath
+        if AltTracker.RefreshSheet then
+            AltTracker.RefreshSheet()
+        end
+    end)
+end
+
 local function ResetCharacter(char)
 
     -- primary professions (legacy fields kept for compat)
@@ -77,6 +245,7 @@ local function ResetCharacter(char)
     for _, slot in ipairs(GEAR_SLOTS) do
         char["gear_"..slot.key]     = 0
         char["gearq_"..slot.key]    = 0   -- item quality (5 = legendary)
+        char["gearid_"..slot.key]   = 0   -- compact item id (safe to sync)
         char["gearname_"..slot.key] = ""   -- item name (for BiS matching)
         char["gearlink_"..slot.key] = ""   -- full item link (for tooltips)
     end
@@ -119,10 +288,37 @@ function AltTracker.ScanCharacter()
     char.class = classFile
 
     char.race = select(2, UnitRace("player"))
+    char.raceKey = char.race or ""
 
     -- Gender: 2 = male, 3 = female
     local gender = UnitSex("player")
     char.gender = (gender == 3) and "Female" or "Male"
+    char.sexID = (gender == 3) and 1 or 0
+
+    -- Compact appearance fields for offline model reconstruction (sync-safe).
+    -- These are tiny values and ride through the normal character serializer.
+    char.displayid = ReadPlayerDisplayID()
+
+    -- Model path capture is two-phase because the model file load is
+    -- asynchronous in TBC Classic 2.5.x. The synchronous read often
+    -- returns "" because the file is still streaming in. The retry
+    -- queue (QueueModelPathRetry) waits 0.3s and reads again — by
+    -- which time the file has loaded.
+    --
+    -- Strategy: try synchronously first (cheap, sometimes wins), and
+    -- ALWAYS queue a retry to overwrite with the deferred value if the
+    -- sync read didn't already produce a non-empty path. The retry is
+    -- idempotent (no-op if char.modelPath is already correct).
+    local modelPath = ReadPlayerModelPath()
+    if modelPath ~= "" then
+        char.modelPath = modelPath
+    elseif type(char.modelPath) ~= "string" then
+        char.modelPath = ""
+    end
+    -- ALWAYS queue retry on first scan after login: the previous-session
+    -- modelPath in saved variables may be stale (race-change, expansion
+    -- model rev, etc.) and the deferred value is more authoritative.
+    QueueModelPathRetry(guid)
 
     char.level = UnitLevel("player")
 
@@ -385,20 +581,23 @@ function AltTracker.ScanCharacter()
     for _, slot in ipairs(GEAR_SLOTS) do
         local link = GetInventoryItemLink("player", slot.id)
         if link then
+            local itemID = ItemIDFromLink(link)
+            char["gearid_"..slot.key] = itemID
+            char["gearlink_"..slot.key] = link
             local itemName, _, quality, ilvl = GetItemInfo(link)
             if ilvl then
                 char["gear_"..slot.key]      = ilvl
                 char["gearq_"..slot.key]     = quality or 0
                 char["gearname_"..slot.key]  = itemName or ""
-                char["gearlink_"..slot.key]  = link
             else
-                -- Item link exists but data not cached yet — keep old value,
-                -- queue link for retry once GET_ITEM_INFO_RECEIVED fires.
+                -- Item link exists but item data isn't cached yet. Keep the
+                -- existing ilvl/quality/name values and retry on cache event.
                 pendingLinks[link] = slot.key
             end
         else
             char["gear_"..slot.key]      = 0
             char["gearq_"..slot.key]     = 0
+            char["gearid_"..slot.key]    = 0
             char["gearname_"..slot.key]  = ""
             char["gearlink_"..slot.key]  = ""
         end

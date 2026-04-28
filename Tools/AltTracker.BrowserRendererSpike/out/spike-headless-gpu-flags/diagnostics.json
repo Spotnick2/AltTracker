@@ -1,0 +1,52 @@
+{
+  "mode": {
+    "name": "headless-gpu-flags",
+    "headless": true,
+    "args": [
+      "--enable-webgl",
+      "--ignore-gpu-blocklist",
+      "--disable-gpu-sandbox"
+    ]
+  },
+  "pageMode": "spike",
+  "url": "http://127.0.0.1:4173/spike.html?contentPath=http%3A%2F%2F127.0.0.1%3A4173%2Fproxy%2Fmodelviewer%2Flive%2F&preserveDrawingBuffer=1",
+  "pageError": "",
+  "requestFailures": [],
+  "statusErrors": [
+    "404 http://127.0.0.1:4173/proxy/modelviewer/live/mo3/986648.mo3",
+    "404 http://127.0.0.1:4173/proxy/modelviewer/live/meta/item/28787.json",
+    "404 http://127.0.0.1:4173/proxy/modelviewer/live/mo3/147547.mo3"
+  ],
+  "diagnostics": {
+    "renderReady": true,
+    "renderError": "",
+    "renderStatus": "ready",
+    "preservePatchEnabled": true,
+    "modelState": {
+      "actorCount": 1,
+      "distance": 15,
+      "azimuth": 4.71238898038469,
+      "zenith": 1.5707963267948966
+    },
+    "canvases": [
+      {
+        "index": 0,
+        "width": 512,
+        "height": 410,
+        "clientWidth": 512,
+        "clientHeight": 410
+      }
+    ],
+    "canvasDataUrlLength": 7654,
+    "canvasDataUrlPrefix": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAg",
+    "canvasDataUrlError": "",
+    "sample2D": null,
+    "sampleWebGl": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "sampleWebGlError": ""
+  }
+}

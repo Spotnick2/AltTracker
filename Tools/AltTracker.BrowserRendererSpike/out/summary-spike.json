@@ -1,0 +1,21 @@
+[
+  {
+    "runId": "spike-dracthyr-demo-live-headed-default",
+    "ok": true,
+    "renderReady": true,
+    "renderError": "",
+    "renderStatus": "ready",
+    "actorCount": 1,
+    "canvasCount": 1,
+    "sample2D": null,
+    "sampleWebGl": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "canvasDataUrlLength": 7654,
+    "statusErrors": 11,
+    "requestFailures": 0
+  }
+]

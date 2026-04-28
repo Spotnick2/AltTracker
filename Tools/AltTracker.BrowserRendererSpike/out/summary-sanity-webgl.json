@@ -1,0 +1,21 @@
+[
+  {
+    "runId": "sanity-webgl-headless-gpu-flags",
+    "ok": true,
+    "renderReady": true,
+    "renderError": "",
+    "renderStatus": "ready",
+    "actorCount": 0,
+    "canvasCount": 1,
+    "sample2D": null,
+    "sampleWebGl": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "canvasDataUrlLength": 9498,
+    "statusErrors": 0,
+    "requestFailures": 0
+  }
+]

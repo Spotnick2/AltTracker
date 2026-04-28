@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "i/w94i46JiE=",
+  "success": true,
+  "projectFilePath": "C:\\Projects\\AltTracker\\Tools\\AltTracker.RenderPipeline\\AltTracker.RenderPipeline.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\nicol\\.nuget\\packages\\moonsharp\\2.0.0\\moonsharp.2.0.0.nupkg.sha512",
+    "C:\\Users\\nicol\\.nuget\\packages\\sixlabors.imagesharp\\3.1.12\\sixlabors.imagesharp.3.1.12.nupkg.sha512"
+  ],
+  "logs": []
+}

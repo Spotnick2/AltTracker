@@ -1,0 +1,2 @@
+[browser:warning] [.WebGL-0x1d4c001a9400]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels
+[browser:warning] WebGL: CONTEXT_LOST_WEBGL: loseContext: context lost

@@ -8,7 +8,7 @@ AltTracker = AltTracker or {}
 
 local ROW_HEIGHT    = 22
 local HEADER_HEIGHT = 28     -- compact; gear/skills/rep icon sections override to 32
-local SIDEBAR_WIDTH = 190
+local SIDEBAR_WIDTH = 230
 local FRAME_W       = 1150   -- default; sections override via preferW
 local FRAME_H       = 460    -- default; sections override via preferH
 local currentHeaderHeight = HEADER_HEIGHT
@@ -46,6 +46,15 @@ AltTracker.LAYOUT.FOOTER_HEIGHT  = 22
 local function IC(name)
     return (AltTracker.MEDIA_PATH or "Interface\\AddOns\\AltTracker\\Media\\")
         .. "Icons\\" .. name .. ".tga"
+end
+
+local function SetSidebarIconTexture(tex, texturePath, useCrop)
+    tex:SetTexture(texturePath)
+    if useCrop then
+        tex:SetTexCoord(0.08, 0.92, 0.92, 0.08)
+    else
+        tex:SetTexCoord(0, 1, 1, 0)
+    end
 end
 
 local SECTIONS = {
@@ -168,6 +177,571 @@ local NAME_COL_WIDTH
 local function ComputeFrozenWidth()
     NAME_COL_WIDTH = AltTracker.Columns[1].width
     FROZEN_WIDTH   = 10 + NAME_COL_WIDTH + 6
+end
+
+local AltTrackerCameraPresentation = {
+    active = false,
+    mode = nil,
+    capture = nil,
+    elapsed = 0,
+}
+AltTracker.AltTrackerCameraPresentation = AltTrackerCameraPresentation
+
+do
+    -- Minimal Narcissus-style camera presentation port for Classic/BCC.
+    --
+    -- Design notes:
+    --   * We deliberately DO NOT touch `test_cameraOverShoulder`. In Classic
+    --     (Interface 20505) writing that CVar trips Blizzard's experimental
+    --     ActionCam warning popup, and the OTS shift hides the player behind
+    --     the centered AltTracker window anyway. Removing it kills both bugs.
+    --   * We only use stable, non-experimental camera APIs:
+    --       SaveView / SetView          -- exact view restore
+    --       GetCameraZoom / CameraZoomIn / CameraZoomOut
+    --       MoveViewRightStart / MoveViewRightStop  (and Left*) for orbit
+    --   * Every API call is feature-detected and pcall-guarded; missing APIs
+    --     fail silently.
+    --   * Combat / logout / reload / errors funnel through ForceRestore so
+    --     no camera state can leak past close.
+
+    local function CameraDebug(msg)
+        if not (AltTrackerConfig and AltTrackerConfig.worldCameraPresentationDebug) then
+            return
+        end
+        if DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.AddMessage then
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[AltTracker Camera]|r " .. tostring(msg or ""))
+        end
+    end
+
+    function AltTrackerCameraPresentation:_Clamp(v, minV, maxV, fallback)
+        v = tonumber(v)
+        if not v then
+            return fallback
+        end
+        if v < minV then
+            return minV
+        end
+        if v > maxV then
+            return maxV
+        end
+        return v
+    end
+
+    function AltTrackerCameraPresentation:_GetConfig()
+        AltTrackerConfig = AltTrackerConfig or {}
+        if AltTracker.EnsureConfigDefaults then
+            AltTracker.EnsureConfigDefaults()
+        end
+        return {
+            enabled       = AltTrackerConfig.enableWorldCameraPresentation ~= false,
+            enterDuration = self:_Clamp(AltTrackerConfig.worldCameraEnterDuration, 0.35, 1.50, 0.60),
+            exitDuration  = self:_Clamp(AltTrackerConfig.worldCameraExitDuration,  0.25, 1.20, 0.45),
+            zoomPreset    = self:_Clamp(AltTrackerConfig.worldCameraZoomPreset,    1.20, 18.0, 8.5),
+            yawOffset     = self:_Clamp(AltTrackerConfig.worldCameraYawOffset,    -1.2,  1.2, -0.22),
+            yawDegrees    = self:_Clamp(AltTrackerConfig.worldCameraYawDegrees,    20,   240, 60),
+            savedViewSlot = math.floor(self:_Clamp(AltTrackerConfig.worldCameraSavedViewSlot, 2, 5, 5)),
+            continuousOrbit = AltTrackerConfig.worldCameraContinuousOrbit ~= false,
+            orbitSpeed    = self:_Clamp(AltTrackerConfig.worldCameraOrbitSpeed, 0.001, 0.05, 0.005),
+        }
+    end
+
+    function AltTrackerCameraPresentation:IsSupported()
+        -- Only require the stable APIs we actually call. test_cameraOverShoulder
+        -- intentionally NOT in this set.
+        return type(SaveView)       == "function"
+           and type(SetView)        == "function"
+           and type(GetCameraZoom)  == "function"
+           and type(CameraZoomIn)   == "function"
+           and type(CameraZoomOut)  == "function"
+    end
+
+    function AltTrackerCameraPresentation:CaptureCurrentCameraState()
+        if not self:IsSupported() then
+            return false
+        end
+
+        local config = self:_GetConfig()
+        self.config  = config
+        self.capture = {
+            savedViewSlot = config.savedViewSlot,
+            zoom          = tonumber(GetCameraZoom()) or 0,
+        }
+        pcall(SaveView, self.capture.savedViewSlot)
+        return true
+    end
+
+    function AltTrackerCameraPresentation:_SetZoom(goal)
+        local current = tonumber(GetCameraZoom()) or goal
+        local delta = (tonumber(goal) or current) - current
+        if math.abs(delta) < 0.001 then
+            return
+        end
+        if delta > 0 then
+            pcall(CameraZoomOut, delta)
+        else
+            pcall(CameraZoomIn, -delta)
+        end
+    end
+
+    function AltTrackerCameraPresentation:_StopYaw()
+        if type(MoveViewRightStop) == "function" then
+            pcall(MoveViewRightStop)
+        end
+        if type(MoveViewLeftStop) == "function" then
+            pcall(MoveViewLeftStop)
+        end
+    end
+
+    -- Lateral character placement via test_cameraOverShoulder. This is
+    -- the "experimental" CVar that triggers WoW's confirmation popup —
+    -- but we silence that popup before any of our SetCVar calls fire (see
+    -- the EXPERIMENTAL_CVAR_CONFIRMATION_NEEDED unregister at the end of
+    -- this block). Narcissus uses the same approach.
+    --
+    -- Per-race shoulder factor table copied from Narcissus Classic
+    -- ZoomValuebyRaceID. Format: { factor1, factor2 } — used as
+    --   offset = zoom * factor1 + factor2
+    -- which matches each race's body width / pivot offset so the character
+    -- ends up framed in roughly the same on-screen position regardless of
+    -- which character is logged in.
+    local SHOULDER_FACTORS = {
+        [0]  = { 0.361,  -0.1654 },  -- default
+        [1]  = { 0.3283, -0.02   },  -- Human
+        [2]  = { 0.2667, -0.1233 },  -- Orc
+        [3]  = { 0.2667, -0.0267 },  -- Dwarf
+        [4]  = { 0.30,   -0.0404 },  -- Night Elf
+        [5]  = { 0.3537, -0.15   },  -- Undead
+        [6]  = { 0.2027, -0.18   },  -- Tauren
+        [7]  = { 0.329,   0.0517 },  -- Gnome
+        [8]  = { 0.2787,  0.04   },  -- Troll
+        [10] = { 0.361,  -0.1654 },  -- Blood Elf
+        [11] = { 0.248,  -0.02   },  -- Draenei
+    }
+
+    function AltTrackerCameraPresentation:_ComputeShoulderOffset(zoom)
+        local raceID = 0
+        if type(UnitRace) == "function" then
+            local _, _, rid = UnitRace("player")
+            raceID = tonumber(rid) or 0
+        end
+        local factors = SHOULDER_FACTORS[raceID] or SHOULDER_FACTORS[0]
+        -- Sign convention in WoW: POSITIVE shoulder offset shifts the
+        -- character to the LEFT on screen (camera goes right of player).
+        -- That's exactly what the user wants (room for the addon on the
+        -- right, character visible on the left).
+        local raw = zoom * factors[1] + factors[2]
+        -- Allow a global multiplier so users can dial it in. >1.0 pushes
+        -- the character further left.
+        local mult = tonumber(AltTrackerConfig and AltTrackerConfig.worldCameraShoulderMult) or 1.0
+        return raw * mult
+    end
+
+    function AltTrackerCameraPresentation:_StartYaw(speed)
+        speed = tonumber(speed) or 0
+        if math.abs(speed) <= 0.001 then
+            return
+        end
+        self:_StopYaw()
+        if speed > 0 and type(MoveViewRightStart) == "function" then
+            pcall(MoveViewRightStart, speed)
+        elseif speed < 0 and type(MoveViewLeftStart) == "function" then
+            pcall(MoveViewLeftStart, -speed)
+        elseif speed < 0 and type(MoveViewRightStart) == "function" then
+            pcall(MoveViewRightStart, -speed)
+        end
+    end
+
+    -- Slow continuous orbit (Narcissus-style). Uses the same MoveView API
+    -- as the swing but bypasses the swing-speed clamp because orbit speeds
+    -- are an order of magnitude smaller (e.g. 0.005 vs 0.55).
+    function AltTrackerCameraPresentation:_StartOrbit(speed)
+        speed = tonumber(speed) or 0
+        if math.abs(speed) <= 0.0001 then
+            return
+        end
+        self:_StopYaw()
+        if speed > 0 and type(MoveViewRightStart) == "function" then
+            pcall(MoveViewRightStart, speed)
+        elseif speed < 0 and type(MoveViewLeftStart) == "function" then
+            pcall(MoveViewLeftStart, -speed)
+        end
+    end
+
+    function AltTrackerCameraPresentation:UpdateAnimation(elapsed)
+        if not self.mode then
+            if self.animFrame then
+                self.animFrame:Hide()
+            end
+            return
+        end
+
+        self.elapsed = (self.elapsed or 0) + (elapsed or 0)
+
+        if self.mode == "enter" then
+            -- The zoom is fired once in Enter() (the engine handles the
+            -- smooth animation natively). All we do here is wait for the
+            -- swing duration to elapse, then hand the yaw off to the slow
+            -- continuous orbit.
+            local duration = math.max(0.01, self.config and self.config.enterDuration or 0.60)
+            if self.elapsed >= duration then
+                if self.config and self.config.continuousOrbit then
+                    local dir = self.yawDir or -1
+                    self:_StartOrbit(dir * (self.config.orbitSpeed or 0.005))
+                else
+                    self:_StopYaw()
+                end
+                self.mode = nil
+                if self.animFrame then
+                    self.animFrame:Hide()
+                end
+                CameraDebug("enter complete")
+            end
+            return
+        end
+
+        if self.mode == "exit" then
+            -- SetView already snapped the camera back instantly in Exit();
+            -- we just wait out the exit duration so the OnUpdate loop has a
+            -- chance to be torn down cleanly.
+            local duration = math.max(0.01, self.config and self.config.exitDuration or 0.45)
+            if self.elapsed >= duration then
+                self:ForceRestore("exit-complete")
+            end
+        end
+    end
+
+    -- NOTE: We deliberately do NOT touch the AltTracker frame's size or
+    -- anchor during the camera presentation. Earlier iterations moved the
+    -- addon off to a corner so the screen-centered character would be
+    -- visible — but the user's correct insight is that this is purely a
+    -- camera concern. We now use test_cameraOverShoulder to push the
+    -- character laterally on screen (Narcissus-style), which leaves the
+    -- addon sitting where the user placed it.
+
+    function AltTrackerCameraPresentation:Enter()
+        if self.active then
+            return
+        end
+        if InCombatLockdown and InCombatLockdown() then
+            return
+        end
+        self.config = self:_GetConfig()
+        if not (self.config and self.config.enabled) then
+            return
+        end
+        if not self:CaptureCurrentCameraState() then
+            return
+        end
+
+        self.active        = true
+        self.mode          = "enter"
+        self.elapsed       = 0
+        self.enterFromZoom = self.capture.zoom
+        self.enterToZoom   = self.config.zoomPreset
+
+        -- Raise cameraDistanceMaxZoomFactor temporarily. On Classic/BCC this
+        -- is a stable (non-experimental) CVar with a max of 2.6. The default
+        -- of 1.0 caps the engine's zoom-out around ~15 yards; lifting it lets
+        -- our preset of 8+ actually reach its target instead of clamping
+        -- silently. Captured on entry, restored on exit.
+        if type(GetCVar) == "function" and type(SetCVar) == "function" then
+            self.capture.cameraDistanceMaxZoomFactor =
+                tonumber(GetCVar("cameraDistanceMaxZoomFactor")) or 1.0
+            if self.capture.cameraDistanceMaxZoomFactor < 2.0 then
+                pcall(SetCVar, "cameraDistanceMaxZoomFactor", 2.0)
+            end
+        end
+
+        -- Fire the zoom once and let the engine animate it natively. Doing
+        -- this incrementally per-frame in OnUpdate (the previous approach)
+        -- causes CameraZoomOut calls to queue up and overshoot, leaving the
+        -- camera essentially stuck close to the player.
+        self:_SetZoom(self.enterToZoom)
+
+        -- Lateral character shift via test_cameraOverShoulder. This is
+        -- exactly what Narcissus does — the only reason it's "experimental"
+        -- in BCC is the popup gate, which we suppress by unregistering
+        -- EXPERIMENTAL_CVAR_CONFIRMATION_NEEDED at file load (see bottom
+        -- of this `do` block). Capture before we touch it; restore on exit.
+        if type(GetCVar) == "function" and type(SetCVar) == "function" then
+            self.capture.shoulderOffset = tonumber(GetCVar("test_cameraOverShoulder")) or 0
+            local desired = self:_ComputeShoulderOffset(self.enterToZoom)
+            pcall(SetCVar, "test_cameraOverShoulder", desired)
+            CameraDebug(string.format("shoulder: from=%.3f to=%.3f",
+                self.capture.shoulderOffset, desired))
+        end
+
+        do
+            local yawMoveSpeed = tonumber(GetCVar and GetCVar("cameraYawMoveSpeed")) or 180
+            if yawMoveSpeed <= 0 then yawMoveSpeed = 180 end
+            local dir     = (self.config.yawOffset or -1) < 0 and -1 or 1
+            local degrees = math.abs(tonumber(self.config.yawDegrees) or 60)
+            local seconds = math.max(0.05, tonumber(self.config.enterDuration) or 0.60)
+            local speed   = (degrees / yawMoveSpeed) / seconds
+            speed = self:_Clamp(speed, 0.10, 4.0, 1.0)
+            self.yawDir = dir
+            self:_StartYaw(dir * speed)
+            CameraDebug(string.format("enter yaw: target=%d speed=%.3f yawMoveSpeed=%.1f",
+                degrees, speed, yawMoveSpeed))
+        end
+
+        if self.animFrame then
+            self.animFrame:Show()
+        end
+        CameraDebug("enter start")
+    end
+
+    function AltTrackerCameraPresentation:Exit(reason)
+        if not self.active or self.mode == "exit" then
+            return
+        end
+        self:_StopYaw()
+
+        self.mode         = "exit"
+        self.elapsed      = 0
+        self.exitFromZoom = tonumber(GetCameraZoom()) or (self.capture and self.capture.zoom) or 0
+        self.exitToZoom   = (self.capture and self.capture.zoom) or self.exitFromZoom
+
+        -- Snap the saved view back immediately; the zoom lerp on top makes the
+        -- handoff look smooth even though the underlying view restore is instant.
+        if self.capture and self.capture.savedViewSlot and type(SetView) == "function" then
+            pcall(SetView, self.capture.savedViewSlot)
+        end
+
+        if self.animFrame then
+            self.animFrame:Show()
+        end
+        CameraDebug("exit start: " .. tostring(reason or "hide"))
+    end
+
+    function AltTrackerCameraPresentation:ForceRestore(reason)
+        self:_StopYaw()
+        if self.animFrame then
+            self.animFrame:Hide()
+        end
+
+        if self.capture then
+            if self.capture.savedViewSlot and type(SetView) == "function" then
+                pcall(SetView, self.capture.savedViewSlot)
+            end
+            self:_SetZoom(self.capture.zoom or 0)
+            -- Restore CVars exactly as captured. We restore unconditionally
+            -- (even if we didn't bump them) so any path through this function
+            -- leaves no trace of our CVar changes.
+            if type(SetCVar) == "function" then
+                if self.capture.cameraDistanceMaxZoomFactor then
+                    pcall(SetCVar, "cameraDistanceMaxZoomFactor",
+                          self.capture.cameraDistanceMaxZoomFactor)
+                end
+                if self.capture.shoulderOffset then
+                    pcall(SetCVar, "test_cameraOverShoulder",
+                          self.capture.shoulderOffset)
+                end
+            end
+        end
+
+        self.active  = false
+        self.mode    = nil
+        self.capture = nil
+        self.elapsed = 0
+        CameraDebug("restored: " .. tostring(reason or "force"))
+    end
+
+    AltTrackerCameraPresentation.animFrame = CreateFrame("Frame")
+    AltTrackerCameraPresentation.animFrame:Hide()
+    AltTrackerCameraPresentation.animFrame:SetScript("OnUpdate", function(_, elapsed)
+        AltTrackerCameraPresentation:UpdateAnimation(elapsed)
+    end)
+
+    AltTrackerCameraPresentation.eventFrame = CreateFrame("Frame")
+    AltTrackerCameraPresentation.eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
+    AltTrackerCameraPresentation.eventFrame:RegisterEvent("PLAYER_LOGOUT")
+    AltTrackerCameraPresentation.eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+    AltTrackerCameraPresentation.eventFrame:SetScript("OnEvent", function(_, event)
+        if AltTrackerCameraPresentation.active then
+            AltTrackerCameraPresentation:ForceRestore(event)
+        end
+    end)
+
+    -- Suppress the engine-level "Are you sure you want to enable this
+    -- experimental feature?" popup. Default Blizzard UI registers
+    -- EXPERIMENTAL_CVAR_CONFIRMATION_NEEDED on UIParent, which fires
+    -- whenever a script writes to test_* CVars. Narcissus does the exact
+    -- same unregister to keep its own test_cameraOverShoulder /
+    -- test_cameraDynamicPitch writes silent. We do this once at file
+    -- load, the same way Narcissus does — there's no CVar-by-CVar opt-in
+    -- API; you either get the popup for all of them or none. We use
+    -- pcall in case some future client doesn't have this event.
+    if UIParent and type(UIParent.UnregisterEvent) == "function" then
+        pcall(UIParent.UnregisterEvent, UIParent, "EXPERIMENTAL_CVAR_CONFIRMATION_NEEDED")
+    end
+end
+
+------------------------------------------------------------
+-- Open animation
+--
+-- Plays a short fade-in + tiny scale-up when the AltTracker window
+-- becomes visible. Independent of the camera presentation so users can
+-- toggle them separately. Self-cleans on completion; final values are
+-- forced to (alpha=1, scale=user scale) so an interrupted animation
+-- can never leave the frame in a half-transparent / shrunk state.
+------------------------------------------------------------
+
+local OpenAnimRunner
+local function PlayOpenAnimation(targetFrame)
+    if not (AltTrackerConfig and AltTrackerConfig.enableOpenAnimation) then
+        return
+    end
+    if not targetFrame then return end
+
+    local userScale = AltTrackerConfig.scale or 1.0
+    local startScale = userScale * 0.96
+    local duration = 0.22
+
+    targetFrame:SetAlpha(0)
+    targetFrame:SetScale(startScale)
+
+    OpenAnimRunner = OpenAnimRunner or CreateFrame("Frame")
+    OpenAnimRunner:Hide()
+    OpenAnimRunner.elapsed = 0
+    OpenAnimRunner:SetScript("OnUpdate", function(self, dt)
+        self.elapsed = (self.elapsed or 0) + (dt or 0)
+        local p = math.min(1, self.elapsed / duration)
+        local eased = p * p * (3 - 2 * p) -- smoothstep
+        targetFrame:SetAlpha(eased)
+        targetFrame:SetScale(startScale + (userScale - startScale) * eased)
+        if p >= 1 then
+            targetFrame:SetAlpha(1)
+            targetFrame:SetScale(userScale)
+            self:SetScript("OnUpdate", nil)
+            self:Hide()
+        end
+    end)
+    OpenAnimRunner:Show()
+end
+AltTracker._PlayOpenAnimation = PlayOpenAnimation
+
+------------------------------------------------------------
+-- Minimap button
+--
+-- Minimal LibDBIcon-style button. No external lib dependency to keep the
+-- TOC unchanged. Position is stored as an angle around the minimap, so a
+-- single number survives between sessions. Left-click toggles the sheet,
+-- right-click opens config, drag repositions around the minimap edge.
+------------------------------------------------------------
+
+local minimapBtn
+
+local function PositionMinimapButton()
+    if not minimapBtn then return end
+    AltTrackerConfig.minimapButton = AltTrackerConfig.minimapButton or {}
+    local angle = tonumber(AltTrackerConfig.minimapButton.angle) or 200
+    local rads = math.rad(angle)
+    local r = 80 -- distance from minimap center; sits just outside the ring
+    minimapBtn:ClearAllPoints()
+    minimapBtn:SetPoint("CENTER", Minimap, "CENTER", r * math.cos(rads), r * math.sin(rads))
+end
+
+local function CreateMinimapButton()
+    if minimapBtn or not Minimap then return end
+    AltTrackerConfig = AltTrackerConfig or {}
+    AltTrackerConfig.minimapButton = AltTrackerConfig.minimapButton or {}
+
+    local btn = CreateFrame("Button", "AltTrackerMinimapButton", Minimap)
+    btn:SetSize(31, 31)
+    btn:SetFrameStrata("MEDIUM")
+    btn:SetFrameLevel((Minimap:GetFrameLevel() or 0) + 8)
+    btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    btn:RegisterForDrag("LeftButton")
+    btn:SetMovable(true)
+
+    local icon = btn:CreateTexture(nil, "BACKGROUND")
+    icon:SetSize(20, 20)
+    icon:SetTexture("Interface\\Icons\\INV_Misc_GroupNeedMore")
+    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    icon:SetPoint("CENTER", btn, "CENTER", 0, 1)
+
+    local border = btn:CreateTexture(nil, "OVERLAY")
+    border:SetSize(54, 54)
+    border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+    border:SetPoint("TOPLEFT", btn, "TOPLEFT", 0, 0)
+
+    local highlight = btn:CreateTexture(nil, "HIGHLIGHT")
+    highlight:SetTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+    highlight:SetBlendMode("ADD")
+    highlight:SetPoint("TOPLEFT", btn, "TOPLEFT", 1, -1)
+    highlight:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", -1, 1)
+
+    btn:SetScript("OnDragStart", function(self)
+        self.isDragging = true
+        self:SetScript("OnUpdate", function(s)
+            local mx, my = Minimap:GetCenter()
+            if not mx then return end
+            local px, py = GetCursorPosition()
+            local scale = Minimap:GetEffectiveScale()
+            if scale and scale > 0 then
+                px, py = px / scale, py / scale
+                local angle = math.deg(math.atan2(py - my, px - mx))
+                AltTrackerConfig.minimapButton = AltTrackerConfig.minimapButton or {}
+                AltTrackerConfig.minimapButton.angle = angle
+                PositionMinimapButton()
+            end
+        end)
+    end)
+    btn:SetScript("OnDragStop", function(self)
+        self.isDragging = nil
+        self:SetScript("OnUpdate", nil)
+    end)
+
+    btn:SetScript("OnClick", function(_, button)
+        if button == "RightButton" then
+            if AltTracker.OpenConfig then AltTracker.OpenConfig() end
+        else
+            if AltTracker.ShowSheet then AltTracker.ShowSheet() end
+        end
+    end)
+
+    btn:SetScript("OnEnter", function(self)
+        if self.isDragging then return end
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        GameTooltip:AddLine("AltTracker")
+        GameTooltip:AddLine("|cffffffffLeft-click|r toggle window", 1, 1, 1)
+        GameTooltip:AddLine("|cffffffffRight-click|r options", 1, 1, 1)
+        GameTooltip:AddLine("|cffaaaaaaDrag|r reposition", 0.7, 0.7, 0.7)
+        GameTooltip:Show()
+    end)
+    btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    minimapBtn = btn
+    AltTracker._minimapButton = btn
+    PositionMinimapButton()
+
+    if AltTrackerConfig.minimapButton.hide then
+        btn:Hide()
+    end
+end
+
+function AltTracker.SetMinimapButtonShown(show)
+    AltTrackerConfig = AltTrackerConfig or {}
+    AltTrackerConfig.minimapButton = AltTrackerConfig.minimapButton or {}
+    AltTrackerConfig.minimapButton.hide = not show
+    if not minimapBtn then
+        if show then CreateMinimapButton() end
+        return
+    end
+    if show then minimapBtn:Show() else minimapBtn:Hide() end
+end
+
+-- Build on PLAYER_LOGIN (Minimap is guaranteed to exist by then) and again
+-- on first sheet creation, in case any addon manager loads us late.
+do
+    local mmInit = CreateFrame("Frame")
+    mmInit:RegisterEvent("PLAYER_LOGIN")
+    mmInit:SetScript("OnEvent", function(self)
+        self:UnregisterAllEvents()
+        if AltTracker.EnsureConfigDefaults then AltTracker.EnsureConfigDefaults() end
+        CreateMinimapButton()
+    end)
 end
 
 ------------------------------------------------------------
@@ -898,6 +1472,22 @@ local function CreateFrameIfNeeded()
     frame:SetScale(AltTrackerConfig.scale or 1.0)
     frame:SetMovable(true); frame:EnableMouse(false)  -- drag handled by titleBar
     tinsert(UISpecialFrames,"AltTrackerSheet")
+    frame:SetScript("OnShow", function()
+        -- Camera presentation runs first so the frame-shift it performs
+        -- happens before the open-animation alpha fade — otherwise the
+        -- frame would fade in at its old position and jump.
+        if AltTrackerCameraPresentation and AltTrackerCameraPresentation.Enter then
+            AltTrackerCameraPresentation:Enter()
+        end
+        if AltTracker._PlayOpenAnimation then
+            AltTracker._PlayOpenAnimation(frame)
+        end
+    end)
+    frame:SetScript("OnHide", function()
+        if AltTrackerCameraPresentation and AltTrackerCameraPresentation.Exit then
+            AltTrackerCameraPresentation:Exit("sheet-hide")
+        end
+    end)
 
     --------------------------------------------------------
     -- Title bar — full-width, spans the top of the frame.
@@ -925,9 +1515,9 @@ local function CreateFrameIfNeeded()
     tbSep:SetPoint("BOTTOMRIGHT", titleBar, "BOTTOMRIGHT", 0, 0)
     tbSep:SetColorTexture(0, 0, 0, 1)
 
-    -- Title text
+    -- Title text — centered across the full width of the title bar.
     local titleText = titleBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    titleText:SetPoint("LEFT", SIDEBAR_WIDTH + 10, 0)
+    titleText:SetPoint("CENTER", titleBar, "CENTER", 0, 0)
     titleText:SetText("AltTracker")
     local function UpdateTitleTextColor()
         local r, g, b = AltTracker.GetAccentRGB()
@@ -979,10 +1569,13 @@ local function CreateFrameIfNeeded()
     sbDivider:SetColorTexture(unpack(AltTracker.C.SEP))
 
     -- Section buttons start just below the top divider
+    local SIDEBAR_BUTTON_H = 52
+    local SIDEBAR_BUTTON_STEP = 53
+    local SIDEBAR_BUTTON_ICON = 36
     local btnY = -8
     for _, section in ipairs(SECTIONS) do
         local btn=CreateFrame("Button",nil,sidebar,"BackdropTemplate")
-        btn:SetHeight(26)
+        btn:SetHeight(SIDEBAR_BUTTON_H)
         btn:SetPoint("TOPLEFT",sidebar,"TOPLEFT",0,btnY)
         btn:SetPoint("TOPRIGHT",sidebar,"TOPRIGHT",0,btnY)
         AltTracker.ApplyBGOnly(btn,
@@ -1000,13 +1593,13 @@ local function CreateFrameIfNeeded()
 
         -- Icon — alpha dims/brightens rather than tinting so artwork colors show
         local icon=btn:CreateTexture(nil,"ARTWORK")
-        icon:SetSize(18,18); icon:SetPoint("LEFT",6,0)
-        icon:SetTexture(section.icon)
-        icon:SetAlpha(0.65)  -- inactive
+        icon:SetSize(SIDEBAR_BUTTON_ICON, SIDEBAR_BUTTON_ICON); icon:SetPoint("LEFT",10,0)
+        SetSidebarIconTexture(icon, section.icon, false)
+        icon:SetAlpha(0.78)  -- inactive
 
         -- Label
         local lbl=btn:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
-        lbl:SetPoint("LEFT",28,0); lbl:SetPoint("RIGHT",-4,0)
+        lbl:SetPoint("LEFT",52,0); lbl:SetPoint("RIGHT",-8,0)
         lbl:SetJustifyH("LEFT"); lbl:SetText(section.label)
         lbl:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
         btn.lbl=lbl; btn.icon=icon
@@ -1027,12 +1620,12 @@ local function CreateFrameIfNeeded()
                     AltTracker.C.BG_BTN_IDLE[1], AltTracker.C.BG_BTN_IDLE[2],
                     AltTracker.C.BG_BTN_IDLE[3], AltTracker.C.BG_BTN_IDLE[4])
                 lbl:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
-                icon:SetAlpha(0.65)
+                icon:SetAlpha(0.78)
             end
         end)
 
         table.insert(sidebarBtns,btn)
-        btnY = btnY - 27
+        btnY = btnY - SIDEBAR_BUTTON_STEP
     end
 
     --------------------------------------------------------
@@ -1069,7 +1662,7 @@ local function CreateFrameIfNeeded()
 
     local function MakePluginButton(plugin)
         local pbtn=CreateFrame("Button",nil,sidebar,"BackdropTemplate")
-        pbtn:SetHeight(26)
+        pbtn:SetHeight(SIDEBAR_BUTTON_H)
         pbtn:SetPoint("TOPLEFT",sidebar,"TOPLEFT",0,sidebar._pluginBtnY)
         pbtn:SetPoint("TOPRIGHT",sidebar,"TOPRIGHT",0,sidebar._pluginBtnY)
         AltTracker.ApplyBGOnly(pbtn,
@@ -1085,14 +1678,14 @@ local function CreateFrameIfNeeded()
         pbtn.accentStripe = stripe
 
         local icon=pbtn:CreateTexture(nil,"ARTWORK")
-        icon:SetSize(18,18); icon:SetPoint("LEFT",6,0)
+        icon:SetSize(SIDEBAR_BUTTON_ICON, SIDEBAR_BUTTON_ICON); icon:SetPoint("LEFT",10,0)
         if plugin.icon then
-            icon:SetTexture(plugin.icon)
+            SetSidebarIconTexture(icon, plugin.icon, false)
         end
-        icon:SetAlpha(0.65)  -- inactive: dim artwork without color-tinting
+        icon:SetAlpha(0.78)  -- inactive: dim artwork without color-tinting
 
         local lbl=pbtn:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
-        lbl:SetPoint("LEFT",28,0); lbl:SetPoint("RIGHT",-4,0)
+        lbl:SetPoint("LEFT",52,0); lbl:SetPoint("RIGHT",-8,0)
         lbl:SetJustifyH("LEFT"); lbl:SetText(plugin.label)
         lbl:SetTextColor(0.5,0.85,0.85)
         pbtn.lbl=lbl; pbtn.icon=icon
@@ -1104,7 +1697,7 @@ local function CreateFrameIfNeeded()
                     AltTracker.C.BG_BTN_IDLE[3], AltTracker.C.BG_BTN_IDLE[4])
                 if b.lbl then b.lbl:SetTextColor(unpack(AltTracker.C.TEXT_DIM)) end
                 if b.accentStripe then b.accentStripe:Hide() end
-                if b.icon then b.icon:SetAlpha(0.65) end
+                if b.icon then b.icon:SetAlpha(0.78) end
             end
             pbtn:SetBackdropColor(
                 AltTracker.C.BG_BTN_ACTIVE[1], AltTracker.C.BG_BTN_ACTIVE[2],
@@ -1133,12 +1726,12 @@ local function CreateFrameIfNeeded()
                     AltTracker.C.BG_BTN_IDLE[1], AltTracker.C.BG_BTN_IDLE[2],
                     AltTracker.C.BG_BTN_IDLE[3], AltTracker.C.BG_BTN_IDLE[4])
                 lbl:SetTextColor(0.5,0.85,0.85)
-                icon:SetAlpha(0.65)
+                icon:SetAlpha(0.78)
             end
         end)
 
         table.insert(sidebarBtns,pbtn)
-        sidebar._pluginBtnY = sidebar._pluginBtnY - 27
+        sidebar._pluginBtnY = sidebar._pluginBtnY - SIDEBAR_BUTTON_STEP
     end
 
     -- Render any plugins already registered before the frame was built
@@ -1336,6 +1929,260 @@ local function CreateFrameIfNeeded()
 
     Y = Y - 44   -- a bit more room for the mid-tick baseline below the slider
 
+    -- ── Roster section ──────────────────────────────────────
+    local optCharsHdr = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    optCharsHdr:SetPoint("TOPLEFT", P, Y)
+    optCharsHdr:SetText("ROSTER")
+    optCharsHdr:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+    Y = Y - 20
+
+    local optModelDebugCheck = CreateFrame("CheckButton", nil, optionsFrame, "UICheckButtonTemplate")
+    optModelDebugCheck:SetSize(18, 18)
+    optModelDebugCheck:SetPoint("TOPLEFT", P - 2, Y + 2)
+    optModelDebugCheck:SetScript("OnClick", function(self)
+        AltTrackerRosterDB = AltTrackerRosterDB or AltTrackerAltsDB or {}
+        AltTrackerAltsDB = AltTrackerRosterDB
+        AltTrackerRosterDB._debugModelStatus = self:GetChecked() and true or false
+        if AltTracker.RefreshSheet then
+            AltTracker.RefreshSheet()
+        end
+    end)
+
+    local optModelDebugLabel = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    optModelDebugLabel:SetPoint("LEFT", optModelDebugCheck, "RIGHT", 4, 0)
+    optModelDebugLabel:SetText("Preview debug mode (AltTracker Roster)")
+    optModelDebugLabel:SetTextColor(unpack(AltTracker.C.TEXT_NORM))
+
+    local optModelDebugHint = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    optModelDebugHint:SetPoint("TOPLEFT", P, Y - 16)
+    optModelDebugHint:SetPoint("RIGHT", optionsFrame, "RIGHT", -P, 0)
+    optModelDebugHint:SetJustifyH("LEFT")
+    optModelDebugHint:SetWordWrap(true)
+    optModelDebugHint:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+    optModelDebugHint:SetText("Shows preview mode diagnostics (live model vs static render vs card) and opens the Roster debug text window.")
+
+    Y = Y - 42
+
+    -- ── Presentation section ──────────────────────────────
+    -- Camera presentation, frame shift, continuous orbit, open animation,
+    -- and the minimap-button toggle all live here so users find them in
+    -- the same place they configure scale/theme.
+    local optPresHdr = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    optPresHdr:SetPoint("TOPLEFT", P, Y)
+    optPresHdr:SetText("PRESENTATION")
+    optPresHdr:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+    Y = Y - 20
+
+    local function MakeOptCheckRow(savedKey, label, anchorY, onClick, getter)
+        local cb = CreateFrame("CheckButton", nil, optionsFrame, "UICheckButtonTemplate")
+        cb:SetSize(18, 18)
+        cb:SetPoint("TOPLEFT", P - 2, anchorY + 2)
+        cb._getter = getter or function()
+            return AltTrackerConfig and AltTrackerConfig[savedKey] ~= false
+        end
+        cb:SetScript("OnClick", function(self)
+            AltTrackerConfig = AltTrackerConfig or {}
+            local checked = self:GetChecked() and true or false
+            if onClick then
+                onClick(checked)
+            else
+                AltTrackerConfig[savedKey] = checked
+            end
+        end)
+        local lbl = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        lbl:SetPoint("LEFT", cb, "RIGHT", 4, 0)
+        lbl:SetText(label)
+        lbl:SetTextColor(unpack(AltTracker.C.TEXT_NORM))
+        return cb
+    end
+
+    local optCameraCheck = MakeOptCheckRow("enableWorldCameraPresentation",
+        "World camera presentation when AltTracker opens", Y)
+    Y = Y - 22
+
+    local optOrbitCheck = MakeOptCheckRow("worldCameraContinuousOrbit",
+        "Keep the world slowly rotating around your character while open", Y)
+    Y = Y - 22
+
+    local optOpenAnimCheck = MakeOptCheckRow("enableOpenAnimation",
+        "Play fade-in animation when AltTracker opens", Y)
+    Y = Y - 22
+
+    local optMinimapCheck = MakeOptCheckRow(nil,
+        "Show minimap button (left-click toggle, right-click options, drag to move)", Y,
+        function(checked)
+            if AltTracker.SetMinimapButtonShown then
+                AltTracker.SetMinimapButtonShown(checked)
+            end
+        end,
+        function()
+            return not (AltTrackerConfig and AltTrackerConfig.minimapButton
+                        and AltTrackerConfig.minimapButton.hide)
+        end)
+    Y = Y - 30
+
+    -- ── Account & Sync section ────────────────────────────
+    local optSyncHdr = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    optSyncHdr:SetPoint("TOPLEFT", P, Y)
+    optSyncHdr:SetText("ACCOUNT & SYNC")
+    optSyncHdr:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+    Y = Y - 22
+
+    -- Account number row
+    local optAcctLabel = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    optAcctLabel:SetPoint("TOPLEFT", P, Y)
+    optAcctLabel:SetText("Account #")
+    optAcctLabel:SetTextColor(unpack(AltTracker.C.TEXT_NORM))
+
+    local optAcctBox = CreateFrame("EditBox", "AltTrackerOptAcctBox", optionsFrame, "InputBoxTemplate")
+    optAcctBox:SetSize(60, 22)
+    optAcctBox:SetPoint("TOPLEFT", P + 80, Y + 4)
+    optAcctBox:SetAutoFocus(false)
+    optAcctBox:SetNumeric(true)
+    optAcctBox:SetMaxLetters(3)
+    optAcctBox:SetScript("OnEnterPressed", function(self)
+        local v = tonumber(self:GetText())
+        AltTrackerConfig = AltTrackerConfig or {}
+        AltTrackerConfig.accountNumber = v or ""
+        self:ClearFocus()
+    end)
+    optAcctBox:SetScript("OnEscapePressed", function(self)
+        self:SetText(tostring(AltTrackerConfig.accountNumber or ""))
+        self:ClearFocus()
+    end)
+
+    local optAcctHint = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    optAcctHint:SetPoint("LEFT", optAcctBox, "RIGHT", 12, 0)
+    optAcctHint:SetPoint("RIGHT", optionsFrame, "RIGHT", -P, 0)
+    optAcctHint:SetJustifyH("LEFT")
+    optAcctHint:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+    optAcctHint:SetText("Tags this client's data on next scan/sync.")
+    Y = Y - 30
+
+    local optSendAllCheck = MakeOptCheckRow("sendAllAccounts",
+        "Share all known accounts (uncheck to share only this account's data)", Y)
+    Y = Y - 24
+
+    -- ── Whitelist (sync peers) ────────────────────────────
+    local optWlHdr = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    optWlHdr:SetPoint("TOPLEFT", P, Y)
+    optWlHdr:SetText("SYNC PEERS")
+    optWlHdr:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+    Y = Y - 18
+
+    local optWlHint = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    optWlHint:SetPoint("TOPLEFT", P, Y)
+    optWlHint:SetPoint("RIGHT", optionsFrame, "RIGHT", -P, 0)
+    optWlHint:SetJustifyH("LEFT"); optWlHint:SetWordWrap(true)
+    optWlHint:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+    optWlHint:SetText("Whisper sync targets. Add character names (with realm if needed: Name-Realm).")
+    Y = Y - 24
+
+    -- Add box + button
+    local optWlAddBox = CreateFrame("EditBox", "AltTrackerOptWlAddBox", optionsFrame, "InputBoxTemplate")
+    optWlAddBox:SetSize(180, 22)
+    optWlAddBox:SetPoint("TOPLEFT", P + 4, Y + 4)
+    optWlAddBox:SetAutoFocus(false)
+    optWlAddBox:SetMaxLetters(48)
+
+    local optWlAddBtn = CreateFrame("Button", nil, optionsFrame, "BackdropTemplate")
+    optWlAddBtn:SetSize(60, 22)
+    optWlAddBtn:SetPoint("LEFT", optWlAddBox, "RIGHT", 8, 0)
+    AltTracker.ApplyBackdrop(optWlAddBtn, 0.12, 0.12, 0.12, 1)
+    local optWlAddLbl = optWlAddBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    optWlAddLbl:SetAllPoints(); optWlAddLbl:SetJustifyH("CENTER"); optWlAddLbl:SetText("Add")
+
+    -- List rows (compact). We render one row per slot up to LIST_VISIBLE; a
+    -- name list this small almost never needs scrolling.
+    local OPT_WL_ROWS = 5
+    local optWlRows = {}
+    Y = Y - 30
+    for i = 1, OPT_WL_ROWS do
+        local row = CreateFrame("Frame", nil, optionsFrame)
+        row:SetSize(360, 18)
+        row:SetPoint("TOPLEFT", P + 4, Y - (i - 1) * 18)
+
+        local lbl = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        lbl:SetPoint("LEFT", 0, 0); lbl:SetJustifyH("LEFT")
+        lbl:SetTextColor(unpack(AltTracker.C.TEXT_NORM))
+        row.label = lbl
+
+        local rm = CreateFrame("Button", nil, row, "BackdropTemplate")
+        rm:SetSize(18, 16)
+        rm:SetPoint("LEFT", lbl, "RIGHT", 8, 0)
+        AltTracker.ApplyBackdrop(rm, 0.18, 0.05, 0.05, 1)
+        local rmLbl = rm:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        rmLbl:SetAllPoints(); rmLbl:SetJustifyH("CENTER"); rmLbl:SetText("|cffdddddd×|r")
+        row.removeBtn = rm
+        row:Hide()
+        optWlRows[i] = row
+    end
+    Y = Y - (OPT_WL_ROWS * 18) - 6
+
+    local function OptRefreshWhitelist()
+        AltTrackerConfig = AltTrackerConfig or {}
+        AltTrackerConfig.whitelist = AltTrackerConfig.whitelist or {}
+        local wl = AltTrackerConfig.whitelist
+        for i, row in ipairs(optWlRows) do
+            local name = wl[i]
+            if name then
+                row.label:SetText(name)
+                row.removeBtn:SetScript("OnClick", function()
+                    if AltTracker.RemoveFromWhitelist then
+                        AltTracker.RemoveFromWhitelist(name)
+                        OptRefreshWhitelist()
+                    end
+                end)
+                row:Show()
+            else
+                row:Hide()
+            end
+        end
+    end
+
+    optWlAddBtn:SetScript("OnClick", function()
+        local name = (optWlAddBox:GetText() or ""):match("^%s*(.-)%s*$")
+        if name and name ~= "" and AltTracker.AddToWhitelist then
+            if AltTracker.AddToWhitelist(name) then
+                optWlAddBox:SetText("")
+                OptRefreshWhitelist()
+            end
+        end
+    end)
+    optWlAddBox:SetScript("OnEnterPressed", function() optWlAddBtn:Click() end)
+
+    -- ── Toasts section ────────────────────────────────────
+    local optToastHdr = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    optToastHdr:SetPoint("TOPLEFT", P, Y)
+    optToastHdr:SetText("TOASTS")
+    optToastHdr:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+    Y = Y - 22
+
+    local optToastsCheck = MakeOptCheckRow("toastsEnabled",
+        "Show profession toasts", Y)
+    Y = Y - 22
+
+    local PROFESSION_KEYS = { "Tailoring", "Alchemy", "Jewelcrafting" }
+    local optProfChecks = {}
+    for _, profKey in ipairs(PROFESSION_KEYS) do
+        local cb = CreateFrame("CheckButton", nil, optionsFrame, "UICheckButtonTemplate")
+        cb:SetSize(16, 16)
+        cb:SetPoint("TOPLEFT", P + 18, Y + 2)
+        cb:SetScript("OnClick", function(self)
+            AltTrackerConfig = AltTrackerConfig or {}
+            AltTrackerConfig.toastProfessions = AltTrackerConfig.toastProfessions or {}
+            AltTrackerConfig.toastProfessions[profKey] = self:GetChecked() and true or false
+        end)
+        local lbl = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        lbl:SetPoint("LEFT", cb, "RIGHT", 4, 0)
+        lbl:SetText(profKey)
+        lbl:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+        optProfChecks[profKey] = cb
+        Y = Y - 18
+    end
+
+    Y = Y - 12
+
     -- ── Helper text ───────────────────────────────────────
     local optHint = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     optHint:SetPoint("TOPLEFT", P, Y)
@@ -1348,29 +2195,48 @@ local function CreateFrameIfNeeded()
     -- OnShow: safely refresh all controls from saved config
     optionsFrame:SetScript("OnShow", function()
         AltTrackerConfig = AltTrackerConfig or {}
+        if AltTracker.EnsureConfigDefaults then
+            AltTracker.EnsureConfigDefaults()
+        end
         local scale = AltTrackerConfig.scale or 1.0
         optSliderUpdating = true
         optScaleSlider:SetValue(scale)
         optSliderUpdating = false
+        local rosterDebug = (AltTrackerRosterDB and AltTrackerRosterDB._debugModelStatus)
+            or (AltTrackerAltsDB and AltTrackerAltsDB._debugModelStatus)
+        optModelDebugCheck:SetChecked(rosterDebug and true or false)
+        optCameraCheck:SetChecked(optCameraCheck._getter())
+        optOrbitCheck:SetChecked(optOrbitCheck._getter())
+        optOpenAnimCheck:SetChecked(optOpenAnimCheck._getter())
+        optMinimapCheck:SetChecked(optMinimapCheck._getter())
+        optAcctBox:SetText(tostring(AltTrackerConfig.accountNumber or ""))
+        optSendAllCheck:SetChecked(AltTrackerConfig.sendAllAccounts and true or false)
+        optToastsCheck:SetChecked(AltTrackerConfig.toastsEnabled ~= false)
+        AltTrackerConfig.toastProfessions = AltTrackerConfig.toastProfessions or {}
+        for profKey, cb in pairs(optProfChecks) do
+            cb:SetChecked(AltTrackerConfig.toastProfessions[profKey] ~= false)
+        end
+        OptRefreshWhitelist()
         RefreshThemeBtns()
     end)
 
     -- Add the Options sidebar button
+    local optSect
     do
-        local optSect = {
+        optSect = {
             id = "options",
             label = "Options",
             icon  = (AltTracker.MEDIA_PATH or "Interface\\AddOns\\AltTracker\\Media\\")
                     .. "Icons\\options.tga",
             _isPlugin  = true,
-            preferW = 760,
-            preferH = 340,
+            preferW = 820,
+            preferH = 760,
             OnActivate = function(f)
                 f.bodyScroll:Hide(); f.frozenScroll:Hide()
                 f.headerScroll:Hide(); f.frozenHeader:Hide()
                 f.hScrollBar:Hide(); f.totalsBar:Hide()
                 optionsFrame:Show()
-                ResizeFrame(760, 340)
+                ResizeFrame(820, 760)
             end,
             OnDeactivate = function(f)
                 optionsFrame:Hide()
@@ -1378,6 +2244,12 @@ local function CreateFrameIfNeeded()
             end,
         }
         MakePluginButton(optSect)
+    end
+    -- Stored on AltTracker so AltTracker.OpenConfig() (and the minimap
+    -- right-click) can switch to the Options section without re-introducing
+    -- the standalone config popup.
+    AltTracker._SwitchToOptions = function()
+        if optSect then SwitchSection(optSect) end
     end
 
     local sbDiv2=sidebar:CreateTexture(nil,"ARTWORK")
@@ -1393,8 +2265,7 @@ local function CreateFrameIfNeeded()
     filterRow:SetPoint("BOTTOMRIGHT",sidebar,"BOTTOMRIGHT",0,22)
     local filterIcon=filterRow:CreateTexture(nil,"OVERLAY")
     filterIcon:SetSize(11,11); filterIcon:SetPoint("LEFT",8,0)
-    filterIcon:SetTexture((AltTracker.MEDIA_PATH or "Interface\\AddOns\\AltTracker\\Media\\") .. "Icons\\filter.tga")
-    filterIcon:SetTexCoord(0.08,0.92,0.08,0.92)
+    SetSidebarIconTexture(filterIcon, (AltTracker.MEDIA_PATH or "Interface\\AddOns\\AltTracker\\Media\\") .. "Icons\\filter.tga", true)
     filterIcon:SetVertexColor(unpack(AltTracker.C.TEXT_DIM))
     local filterLbl=filterRow:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
     filterLbl:SetPoint("LEFT",22,0); filterLbl:SetText("Filter")
@@ -1412,6 +2283,9 @@ local function CreateFrameIfNeeded()
         AltTrackerConfig.hideLow = hideLow
         BuildDisplayList(); UpdateScroll(); UpdateRows(); UpdateTotalsBar()
         ResizeFrameToContent()
+        if AltTracker.RefreshSheet then
+            AltTracker.RefreshSheet()
+        end
     end)
 
     --------------------------------------------------------

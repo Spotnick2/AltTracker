@@ -1,0 +1,44 @@
+{
+  "mode": {
+    "name": "headless-default",
+    "headless": true,
+    "args": []
+  },
+  "pageMode": "sanity-webgl",
+  "url": "http://127.0.0.1:4173/sanity-webgl.html",
+  "pageError": "",
+  "requestFailures": [],
+  "statusErrors": [],
+  "diagnostics": {
+    "renderReady": true,
+    "renderError": "",
+    "renderStatus": "ready",
+    "preservePatchEnabled": false,
+    "modelState": {
+      "actorCount": 0,
+      "distance": null,
+      "azimuth": null,
+      "zenith": null
+    },
+    "canvases": [
+      {
+        "index": 0,
+        "width": 512,
+        "height": 512,
+        "clientWidth": 512,
+        "clientHeight": 512
+      }
+    ],
+    "canvasDataUrlLength": 9498,
+    "canvasDataUrlPrefix": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAg",
+    "canvasDataUrlError": "",
+    "sample2D": null,
+    "sampleWebGl": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "sampleWebGlError": ""
+  }
+}

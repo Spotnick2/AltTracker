@@ -1,0 +1,82 @@
+[browser:log] {Face: face, Skin Color: skin, Hair Style: hairStyle, Hair Color: hairColor, Facial Hair: facialStyle}
+[browser:log] {Face: face, Skin Color: skin, Hair Style: hairStyle, Hair Color: hairColor, Facial Hair: facialStyle}
+[browser:log] {Face: face, Skin Color: skin, Hair Style: hairStyle, Hair Color: hairColor, Facial Hair: facialStyle}
+[browser:log] {Face: face, Skin Color: skin, Hair Style: hairStyle, Hair Color: hairColor, Facial Hair: facialStyle}
+[browser:log] {Face: face, Skin Color: skin, Hair Style: hairStyle, Hair Color: hairColor, Facial Hair: facialStyle}
+[browser:log] {Face: face, Skin Color: skin, Hair Style: hairStyle, Hair Color: hairColor, Facial Hair: facialStyle}
+[browser:log] {Face: face, Skin Color: skin, Hair Style: hairStyle, Hair Color: hairColor, Facial Hair: facialStyle}
+[browser:log] {Face: face, Skin Color: skin, Hair Style: hairStyle, Hair Color: hairColor, Facial Hair: facialStyle}
+[browser:log] {Face: face, Skin Color: skin, Hair Style: hairStyle, Hair Color: hairColor, Facial Hair: facialStyle}
+[browser:log] {Face: face, Skin Color: skin, Hair Style: hairStyle, Hair Color: hairColor, Facial Hair: facialStyle}
+[browser:log] {Face: face, Skin Color: skin, Hair Style: hairStyle, Hair Color: hairColor, Facial Hair: facialStyle}
+[browser:warning] In character:  {race: 6, gender: 1, noCharCustomization: true, items: Array(2)} the following options are missing [face, skin]
+[browser:log] Creating viewer with options {type: 2, contentPath: http://127.0.0.1:4173/proxy/modelviewer/live/, container: ce.fn.init, aspect: 1.25, hd: true}
+[browser:log] Creating viewer with options {type: 2, contentPath: http://127.0.0.1:4173/proxy/modelviewer/live/, container: ce.fn.init, aspect: 1.25, hd: true}
+[browser:log] [Texture anisotropy enabled, 16]
+[browser:log] [(float texture) Skinning in shader is supported]
+[browser:log] [setShouldersOverride, undefined]
+[browser:log] [Got customization data v2, Object]
+[browser:log] [applyCustomization options, Array(18)]
+[browser:log] [option, Object]
+[browser:log] [choice, Object]
+[browser:log] [element material, Object]
+[browser:log] [option, Object]
+[browser:log] [choice, Object]
+[browser:log] [element material, Object]
+[browser:log] [element material, Object]
+[browser:log] [element material, Object]
+[browser:log] [element material, Object]
+[browser:log] [option, Object]
+[browser:log] [choice, Object]
+[browser:log] [element geoset, Object]
+[browser:log] [option, Object]
+[browser:log] [choice, Object]
+[browser:log] [element material, Object]
+[browser:log] [option, Object]
+[browser:log] [choice, Object]
+[browser:log] [element geoset, Object]
+[browser:log] [option, Object]
+[browser:log] [choice, Object]
+[browser:log] [element geoset, Object]
+[browser:log] [option, Object]
+[browser:log] [choice, Object]
+[browser:log] [element material, Object]
+[browser:log] [option, Object]
+[browser:log] [choice, Object]
+[browser:log] [option, Object]
+[browser:log] [choice, Object]
+[browser:log] [element geoset, Object]
+[browser:log] [option, Object]
+[browser:log] [choice, Object]
+[browser:log] [element geoset, Object]
+[browser:log] [option, Object]
+[browser:log] [choice, Object]
+[browser:log] [element geoset, Object]
+[browser:log] [option, Object]
+[browser:log] [choice, Object]
+[browser:log] [element geoset, Object]
+[browser:log] [option, Object]
+[browser:log] [choice, Object]
+[browser:log] [element material, Object]
+[browser:log] [option, Object]
+[browser:log] [choice, Object]
+[browser:log] [element geoset, Object]
+[browser:log] [option, Object]
+[browser:log] [choice, Object]
+[browser:log] [option, Object]
+[browser:log] [choice, Object]
+[browser:log] [option, Object]
+[browser:log] [choice, Object]
+[browser:log] [option, Object]
+[browser:log] [choice, Object]
+[browser:log] [Creating item, 20379]
+[browser:log] [Loading item, 20379]
+[browser:log] [Creating item, 28787]
+[browser:log] [Loading item, 28787]
+[browser:error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[browser:log] Not Found
+[browser:log] [Loaded item:, DisplayId, 20379, InventoryType, 17]
+[browser:error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[browser:log] Error loading metadata: error, Not Found
+[browser:error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[browser:log] Not Found
