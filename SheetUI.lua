@@ -191,10 +191,9 @@ do
     -- Minimal Narcissus-style camera presentation port for Classic/BCC.
     --
     -- Design notes:
-    --   * We deliberately DO NOT touch `test_cameraOverShoulder`. In Classic
-    --     (Interface 20505) writing that CVar trips Blizzard's experimental
-    --     ActionCam warning popup, and the OTS shift hides the player behind
-    --     the centered AltTracker window anyway. Removing it kills both bugs.
+    --   * We use `test_cameraOverShoulder` for Narcissus-style lateral
+    --     framing, but unregister Blizzard's experimental-CVar popup event
+    --     before writing it and always restore the captured value on close.
     --   * We only use stable, non-experimental camera APIs:
     --       SaveView / SetView          -- exact view restore
     --       GetCameraZoom / CameraZoomIn / CameraZoomOut
@@ -211,6 +210,10 @@ do
         if DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.AddMessage then
             DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[AltTracker Camera]|r " .. tostring(msg or ""))
         end
+    end
+
+    local function InOutSine(t, b, e, d)
+        return -(e - b) / 2 * (math.cos(math.pi * t / d) - 1) + b
     end
 
     function AltTrackerCameraPresentation:_Clamp(v, minV, maxV, fallback)
@@ -234,13 +237,17 @@ do
         end
         return {
             enabled       = AltTrackerConfig.enableWorldCameraPresentation ~= false,
-            enterDuration = self:_Clamp(AltTrackerConfig.worldCameraEnterDuration, 0.35, 1.50, 0.60),
+            enterDuration = self:_Clamp(AltTrackerConfig.worldCameraEnterDuration, 0.35, 1.50, 1.50),
             exitDuration  = self:_Clamp(AltTrackerConfig.worldCameraExitDuration,  0.25, 1.20, 0.45),
-            zoomPreset    = self:_Clamp(AltTrackerConfig.worldCameraZoomPreset,    1.20, 18.0, 8.5),
+            zoomPreset    = self:_Clamp(AltTrackerConfig.worldCameraZoomPreset,    1.20, 18.0, 2.2),
+            shoulderZoomReference = self:_Clamp(AltTrackerConfig.worldCameraShoulderZoomReference, 1.20, 18.0, 6.2),
+            mountedZoomPreset = self:_Clamp(AltTrackerConfig.worldCameraMountedZoomPreset, 1.20, 18.0, 8.0),
+            mountedShoulderOffset = self:_Clamp(AltTrackerConfig.worldCameraMountedShoulderOffset, 0.0, 12.0, 8.0),
+            forceMountedPresentation = AltTrackerConfig.worldCameraForceMountedPresentation == true,
             yawOffset     = self:_Clamp(AltTrackerConfig.worldCameraYawOffset,    -1.2,  1.2, -0.22),
-            yawDegrees    = self:_Clamp(AltTrackerConfig.worldCameraYawDegrees,    20,   240, 60),
+            yawDegrees    = self:_Clamp(AltTrackerConfig.worldCameraYawDegrees,    20,   540, 430),
             savedViewSlot = math.floor(self:_Clamp(AltTrackerConfig.worldCameraSavedViewSlot, 2, 5, 5)),
-            continuousOrbit = AltTrackerConfig.worldCameraContinuousOrbit ~= false,
+            continuousOrbit = AltTrackerConfig.worldCameraContinuousOrbit == true,
             orbitSpeed    = self:_Clamp(AltTrackerConfig.worldCameraOrbitSpeed, 0.001, 0.05, 0.005),
         }
     end
@@ -317,19 +324,54 @@ do
         [10] = { 0.361,  -0.1654 },  -- Blood Elf
         [11] = { 0.248,  -0.02   },  -- Draenei
     }
+    local MOUNTED_SHOULDER_FACTORS = { 1.2495, -4.0 }
+
+    function AltTrackerCameraPresentation:_IsPlayerMounted()
+        if self.config and self.config.forceMountedPresentation then
+            return true
+        end
+        if type(IsMounted) == "function" and IsMounted() then
+            return true
+        end
+        if type(UnitBuff) == "function" then
+            for i = 1, 40 do
+                local name, _, icon = UnitBuff("player", i)
+                if not name then
+                    break
+                end
+                icon = tostring(icon or ""):lower()
+                if icon:find("mount", 1, true) or icon:find("ability_druid_travelform", 1, true) then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
+    function AltTrackerCameraPresentation:_GetTargetZoom()
+        if self:_IsPlayerMounted() and self.config then
+            return self.config.mountedZoomPreset or 8.0
+        end
+        return (self.config and self.config.zoomPreset) or 2.2
+    end
 
     function AltTrackerCameraPresentation:_ComputeShoulderOffset(zoom)
         local raceID = 0
-        if type(UnitRace) == "function" then
+        local factors
+        if self:_IsPlayerMounted() then
+            return (self.config and self.config.mountedShoulderOffset) or 8.0
+        elseif type(UnitRace) == "function" then
             local _, _, rid = UnitRace("player")
             raceID = tonumber(rid) or 0
+            factors = SHOULDER_FACTORS[raceID] or SHOULDER_FACTORS[0]
         end
-        local factors = SHOULDER_FACTORS[raceID] or SHOULDER_FACTORS[0]
+        factors = factors or SHOULDER_FACTORS[0]
         -- Sign convention in WoW: POSITIVE shoulder offset shifts the
         -- character to the LEFT on screen (camera goes right of player).
         -- That's exactly what the user wants (room for the addon on the
         -- right, character visible on the left).
-        local raw = zoom * factors[1] + factors[2]
+        local placementZoom = (self.config and self.config.shoulderZoomReference) or zoom
+        local raw = placementZoom * factors[1] + factors[2]
         -- Allow a global multiplier so users can dial it in. >1.0 pushes
         -- the character further left.
         local mult = tonumber(AltTrackerConfig and AltTrackerConfig.worldCameraShoulderMult) or 1.0
@@ -342,6 +384,14 @@ do
             return
         end
         self:_StopYaw()
+        self:_ApplyYaw(speed)
+    end
+
+    function AltTrackerCameraPresentation:_ApplyYaw(speed)
+        speed = tonumber(speed) or 0
+        if math.abs(speed) <= 0.001 then
+            return
+        end
         if speed > 0 and type(MoveViewRightStart) == "function" then
             pcall(MoveViewRightStart, speed)
         elseif speed < 0 and type(MoveViewLeftStart) == "function" then
@@ -367,6 +417,22 @@ do
         end
     end
 
+    function AltTrackerCameraPresentation:_MaybeSalute()
+        if self.didSalute then
+            return
+        end
+        self.didSalute = true
+        if not (AltTrackerConfig and AltTrackerConfig.enableWorldCameraSalute) then
+            return
+        end
+        if InCombatLockdown and InCombatLockdown() then
+            return
+        end
+        if type(DoEmote) == "function" then
+            pcall(DoEmote, "SALUTE")
+        end
+    end
+
     function AltTrackerCameraPresentation:UpdateAnimation(elapsed)
         if not self.mode then
             if self.animFrame then
@@ -382,14 +448,20 @@ do
             -- smooth animation natively). All we do here is wait for the
             -- swing duration to elapse, then hand the yaw off to the slow
             -- continuous orbit.
-            local duration = math.max(0.01, self.config and self.config.enterDuration or 0.60)
+            local duration = math.max(0.01, self.config and self.config.enterDuration or 1.50)
+            if self.config and self.yawDir and self.yawFromSpeed and self.yawToSpeed then
+                local t = math.min(self.elapsed, duration)
+                local speed = InOutSine(t, self.yawFromSpeed, self.yawToSpeed, duration)
+                self:_ApplyYaw(self.yawDir * speed)
+            end
             if self.elapsed >= duration then
                 if self.config and self.config.continuousOrbit then
-                    local dir = self.yawDir or -1
+                    local dir = self.yawDir or 1
                     self:_StartOrbit(dir * (self.config.orbitSpeed or 0.005))
                 else
                     self:_StopYaw()
                 end
+                self:_MaybeSalute()
                 self.mode = nil
                 if self.animFrame then
                     self.animFrame:Hide()
@@ -436,8 +508,16 @@ do
         self.active        = true
         self.mode          = "enter"
         self.elapsed       = 0
+        self.didSalute     = false
         self.enterFromZoom = self.capture.zoom
-        self.enterToZoom   = self.config.zoomPreset
+        self.enterToZoom   = self:_GetTargetZoom()
+
+        -- Narcissus starts from camera view 2 before its entry yaw. We save
+        -- the user's current view first, so Exit/ForceRestore still returns
+        -- exactly to the pre-AltTracker camera.
+        if type(SetView) == "function" then
+            pcall(SetView, 2)
+        end
 
         -- Raise cameraDistanceMaxZoomFactor temporarily. On Classic/BCC this
         -- is a stable (non-experimental) CVar with a max of 2.6. The default
@@ -475,11 +555,13 @@ do
             local yawMoveSpeed = tonumber(GetCVar and GetCVar("cameraYawMoveSpeed")) or 180
             if yawMoveSpeed <= 0 then yawMoveSpeed = 180 end
             local dir     = (self.config.yawOffset or -1) < 0 and -1 or 1
-            local degrees = math.abs(tonumber(self.config.yawDegrees) or 60)
-            local seconds = math.max(0.05, tonumber(self.config.enterDuration) or 0.60)
+            local degrees = math.abs(tonumber(self.config.yawDegrees) or 430)
+            local seconds = math.max(0.05, tonumber(self.config.enterDuration) or 1.50)
             local speed   = (degrees / yawMoveSpeed) / seconds
             speed = self:_Clamp(speed, 0.10, 4.0, 1.0)
             self.yawDir = dir
+            self.yawFromSpeed = speed
+            self.yawToSpeed = self.config.orbitSpeed or 0.005
             self:_StartYaw(dir * speed)
             CameraDebug(string.format("enter yaw: target=%d speed=%.3f yawMoveSpeed=%.1f",
                 degrees, speed, yawMoveSpeed))
@@ -1286,6 +1368,41 @@ local function ResizeFrame(w, h)
     frame:SetSize(w, h)
 end
 
+local function SaveWindowPosition()
+    if not (frame and AltTrackerConfig and AltTrackerConfig.rememberWindowPosition) then
+        return
+    end
+    local point, _, relativePoint, xOfs, yOfs = frame:GetPoint(1)
+    AltTrackerConfig.windowPosition = {
+        point = point or "CENTER",
+        relativePoint = relativePoint or point or "CENTER",
+        x = xOfs or 0,
+        y = yOfs or 0,
+    }
+end
+
+local function ApplyWindowPosition()
+    if not frame then return end
+    frame:ClearAllPoints()
+    local pos = AltTrackerConfig and AltTrackerConfig.rememberWindowPosition and AltTrackerConfig.windowPosition
+    if type(pos) == "table" and pos.point then
+        frame:SetPoint(pos.point, UIParent, pos.relativePoint or pos.point, tonumber(pos.x) or 0, tonumber(pos.y) or 0)
+    else
+        frame:SetPoint("CENTER")
+    end
+end
+
+local function ResetWindowPosition()
+    AltTrackerConfig = AltTrackerConfig or {}
+    AltTrackerConfig.windowPosition = nil
+    if frame then
+        frame:ClearAllPoints()
+        frame:SetPoint("CENTER")
+    end
+end
+
+AltTracker.ResetWindowPosition = ResetWindowPosition
+
 ------------------------------------------------------------
 -- Content-driven frame sizing
 --
@@ -1464,7 +1581,7 @@ local function CreateFrameIfNeeded()
 
     frame=CreateFrame("Frame","AltTrackerSheet",UIParent,"BackdropTemplate")
     frame:SetSize(FRAME_W, FRAME_H)
-    frame:SetPoint("CENTER")
+    ApplyWindowPosition()
     frame:SetFrameStrata("DIALOG"); frame:SetToplevel(true)
     AltTracker.ApplyBackdrop(frame,
         AltTracker.C.BG_MAIN[1], AltTracker.C.BG_MAIN[2],
@@ -1501,7 +1618,10 @@ local function CreateFrameIfNeeded()
     titleBar:EnableMouse(true)
     titleBar:RegisterForDrag("LeftButton")
     titleBar:SetScript("OnDragStart", function() frame:StartMoving() end)
-    titleBar:SetScript("OnDragStop",  function() frame:StopMovingOrSizing() end)
+    titleBar:SetScript("OnDragStop",  function()
+        frame:StopMovingOrSizing()
+        SaveWindowPosition()
+    end)
 
     -- Title bar background (slightly lighter than main to distinguish)
     local tbBg = titleBar:CreateTexture(nil, "BACKGROUND")
@@ -2004,6 +2124,10 @@ local function CreateFrameIfNeeded()
         "Keep the world slowly rotating around your character while open", Y)
     Y = Y - 22
 
+    local optSaluteCheck = MakeOptCheckRow("enableWorldCameraSalute",
+        "Salute after the camera finishes moving (visible emote)", Y)
+    Y = Y - 22
+
     local optOpenAnimCheck = MakeOptCheckRow("enableOpenAnimation",
         "Play fade-in animation when AltTracker opens", Y)
     Y = Y - 22
@@ -2019,6 +2143,36 @@ local function CreateFrameIfNeeded()
             return not (AltTrackerConfig and AltTrackerConfig.minimapButton
                         and AltTrackerConfig.minimapButton.hide)
         end)
+    Y = Y - 30
+
+    local optRememberPositionCheck = MakeOptCheckRow("rememberWindowPosition",
+        "Remember AltTracker window position", Y,
+        function(checked)
+            AltTrackerConfig.rememberWindowPosition = checked
+            if checked then
+                SaveWindowPosition()
+            else
+                AltTrackerConfig.windowPosition = nil
+            end
+        end)
+
+    local optResetPosition = CreateFrame("Button", nil, optionsFrame, "BackdropTemplate")
+    optResetPosition:SetSize(92, 20)
+    optResetPosition:SetPoint("LEFT", optRememberPositionCheck, "RIGHT", 260, 0)
+    AltTracker.ApplyBackdrop(optResetPosition, 0.12, 0.12, 0.12, 1)
+    local optResetPositionLbl = optResetPosition:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    optResetPositionLbl:SetAllPoints()
+    optResetPositionLbl:SetJustifyH("CENTER")
+    optResetPositionLbl:SetText("Reset Position")
+    optResetPosition:SetScript("OnClick", function()
+        ResetWindowPosition()
+    end)
+    optResetPosition:SetScript("OnEnter", function()
+        optResetPosition:SetBackdropColor(0.18, 0.18, 0.18, 1)
+    end)
+    optResetPosition:SetScript("OnLeave", function()
+        optResetPosition:SetBackdropColor(0.12, 0.12, 0.12, 1)
+    end)
     Y = Y - 30
 
     -- ── Account & Sync section ────────────────────────────
@@ -2207,8 +2361,10 @@ local function CreateFrameIfNeeded()
         optModelDebugCheck:SetChecked(rosterDebug and true or false)
         optCameraCheck:SetChecked(optCameraCheck._getter())
         optOrbitCheck:SetChecked(optOrbitCheck._getter())
+        optSaluteCheck:SetChecked(optSaluteCheck._getter())
         optOpenAnimCheck:SetChecked(optOpenAnimCheck._getter())
         optMinimapCheck:SetChecked(optMinimapCheck._getter())
+        optRememberPositionCheck:SetChecked(optRememberPositionCheck._getter())
         optAcctBox:SetText(tostring(AltTrackerConfig.accountNumber or ""))
         optSendAllCheck:SetChecked(AltTrackerConfig.sendAllAccounts and true or false)
         optToastsCheck:SetChecked(AltTrackerConfig.toastsEnabled ~= false)

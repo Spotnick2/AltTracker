@@ -14,6 +14,8 @@
 AltTracker      = AltTracker or {}
 AltTrackerConfig = AltTrackerConfig or {}
 
+local CAMERA_PRESENTATION_DEFAULTS_VERSION = 10
+
 ------------------------------------------------------------
 -- Defaults
 ------------------------------------------------------------
@@ -41,11 +43,10 @@ local function EnsureDefaults()
         AltTrackerConfig.scale = 1.0
     end
 
-    -- World camera presentation defaults (live player only).
-    -- NOTE: We deliberately do NOT default `worldCameraShoulderOffset` or
-    -- `worldCameraPitchOffset` -- the minimal Classic-safe controller does not
-    -- touch `test_cameraOverShoulder` (it would trip Blizzard's experimental
-    -- ActionCam popup) or pitch CVars. Old saved values are harmless.
+    -- World camera presentation defaults (live player only). The target is a
+    -- portrait-like composition: the camera swings around to the player's
+    -- front, pushes the character left of the sheet, and restores everything
+    -- on close.
     if AltTrackerConfig.enableWorldCameraPresentation == nil then
         AltTrackerConfig.enableWorldCameraPresentation = true
     end
@@ -53,31 +54,58 @@ local function EnsureDefaults()
         AltTrackerConfig.worldCameraPresentationDebug = false
     end
     if AltTrackerConfig.worldCameraEnterDuration == nil then
-        AltTrackerConfig.worldCameraEnterDuration = 0.60
+        AltTrackerConfig.worldCameraEnterDuration = 1.50
     end
     if AltTrackerConfig.worldCameraExitDuration == nil then
         AltTrackerConfig.worldCameraExitDuration = 0.45
     end
-    -- Migration: any zoom below ~7.0 frames the camera too close. With the
-    -- single-call zoom strategy plus the temporary cameraDistanceMaxZoomFactor
-    -- bump, the new default of 8.5 reliably places the character outside the
-    -- addon footprint. Catches all legacy defaults (2.20 / 2.35 / 4.5 / 6.5).
+    -- v10 camera migration: mirror Narcissus Classic's eased 1.5s yaw, but
+    -- use the leftward direction that keeps AltTracker's composition visible.
+    -- Because the yaw speed eases down during the move, the configured degree
+    -- value needs to be higher than the apparent final rotation. Visual zoom
+    -- is closer, while shoulder placement still uses the old 6.2 reference
+    -- because the user's ideal state came from zooming in after placement.
     do
-        local zp = tonumber(AltTrackerConfig.worldCameraZoomPreset)
-        if zp and zp < 7.0 then
-            AltTrackerConfig.worldCameraZoomPreset = nil
+        local version = tonumber(AltTrackerConfig.worldCameraPresentationDefaultsVersion) or 0
+        if version < CAMERA_PRESENTATION_DEFAULTS_VERSION then
+            local duration = tonumber(AltTrackerConfig.worldCameraEnterDuration)
+            if not duration or duration < 1.0 or math.abs(duration - 0.60) < 0.01 then
+                AltTrackerConfig.worldCameraEnterDuration = 1.50
+            end
+
+            AltTrackerConfig.worldCameraZoomPreset = 2.2
+            AltTrackerConfig.worldCameraShoulderZoomReference = 6.2
+            AltTrackerConfig.worldCameraMountedZoomPreset = 8.0
+            AltTrackerConfig.worldCameraMountedShoulderOffset = 8.0
+            AltTrackerConfig.worldCameraForceMountedPresentation = false
+            AltTrackerConfig.worldCameraYawDegrees = 430
+            AltTrackerConfig.worldCameraYawOffset = -0.22
+            AltTrackerConfig.worldCameraShoulderMult = 1.0
+
+            AltTrackerConfig.worldCameraContinuousOrbit = true
+            AltTrackerConfig.worldCameraPresentationDefaultsVersion = CAMERA_PRESENTATION_DEFAULTS_VERSION
         end
     end
     if AltTrackerConfig.worldCameraZoomPreset == nil then
-        AltTrackerConfig.worldCameraZoomPreset = 8.5
+        AltTrackerConfig.worldCameraZoomPreset = 2.2
+    end
+    if AltTrackerConfig.worldCameraShoulderZoomReference == nil then
+        AltTrackerConfig.worldCameraShoulderZoomReference = 6.2
+    end
+    if AltTrackerConfig.worldCameraMountedZoomPreset == nil then
+        AltTrackerConfig.worldCameraMountedZoomPreset = 8.0
+    end
+    if AltTrackerConfig.worldCameraMountedShoulderOffset == nil then
+        AltTrackerConfig.worldCameraMountedShoulderOffset = 8.0
+    end
+    if AltTrackerConfig.worldCameraForceMountedPresentation == nil then
+        AltTrackerConfig.worldCameraForceMountedPresentation = false
     end
     if AltTrackerConfig.worldCameraYawOffset == nil then
         AltTrackerConfig.worldCameraYawOffset = -0.22
     end
     if AltTrackerConfig.worldCameraYawDegrees == nil then
-        -- A small swing (60deg) rather than a full half-rotation; matches
-        -- Narcissus's "settle into pose" feel instead of a spin.
-        AltTrackerConfig.worldCameraYawDegrees = 60
+        AltTrackerConfig.worldCameraYawDegrees = 430
     end
     if AltTrackerConfig.worldCameraSavedViewSlot == nil then
         AltTrackerConfig.worldCameraSavedViewSlot = 5
@@ -89,9 +117,8 @@ local function EnsureDefaults()
     if AltTrackerConfig.worldCameraShoulderMult == nil then
         AltTrackerConfig.worldCameraShoulderMult = 1.0
     end
-    -- Continuous slow orbit (Narcissus-style "spinning room" effect): keeps
-    -- a tiny MoveViewRightStart running for the whole time AltTracker is
-    -- open, so the world rotates around the centered player.
+    -- Continuous slow orbit follows Narcissus's default camera presentation:
+    -- after the entry yaw, the world keeps turning slowly around the player.
     if AltTrackerConfig.worldCameraContinuousOrbit == nil then
         AltTrackerConfig.worldCameraContinuousOrbit = true
     end
@@ -100,10 +127,16 @@ local function EnsureDefaults()
         -- fast enough to be visible. Tweak with /run AltTrackerConfig.worldCameraOrbitSpeed = N
         AltTrackerConfig.worldCameraOrbitSpeed = 0.005
     end
+    if AltTrackerConfig.enableWorldCameraSalute == nil then
+        AltTrackerConfig.enableWorldCameraSalute = false
+    end
 
     -- Open-window UX defaults
     if AltTrackerConfig.enableOpenAnimation == nil then
         AltTrackerConfig.enableOpenAnimation = true
+    end
+    if AltTrackerConfig.rememberWindowPosition == nil then
+        AltTrackerConfig.rememberWindowPosition = true
     end
 
     -- Minimap button (LibDBIcon-free; angle-around-minimap persistence)
