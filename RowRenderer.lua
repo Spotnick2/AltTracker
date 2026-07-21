@@ -613,7 +613,7 @@ function AltTracker.CreateRow(parent, height, columns)
                     GameTooltip:SetInventoryItem("player", tip.slotID)
                     if tip.bisTier then
                         GameTooltip:AddLine(" ")
-                        GameTooltip:AddLine("|cff00ff00★ BiS: "..tip.bisTier.."|r", 0, 1, 0)
+                        GameTooltip:AddLine("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:0:0:0:0:64:64:4:60:4:60|t|cff00ff00 BiS: "..tip.bisTier.."|r", 0, 1, 0)
                     end
                     GameTooltip:Show()
                 elseif tip.itemLink and tip.itemLink ~= "" then
@@ -628,7 +628,7 @@ function AltTracker.CreateRow(parent, height, columns)
                         GameTooltip:SetHyperlink("item:"..itemID)
                         if tip.bisTier then
                             GameTooltip:AddLine(" ")
-                            GameTooltip:AddLine("|cff00ff00★ BiS: "..tip.bisTier.."|r", 0, 1, 0)
+                            GameTooltip:AddLine("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:0:0:0:0:64:64:4:60:4:60|t|cff00ff00 BiS: "..tip.bisTier.."|r", 0, 1, 0)
                         end
                         GameTooltip:Show()
                     end
@@ -643,7 +643,7 @@ function AltTracker.CreateRow(parent, height, columns)
                     GameTooltip:AddLine(col.label.." — ilvl "..tip.slotIlvl, 0.8,0.8,0.8)
                     if tip.bisTier then
                         GameTooltip:AddLine(" ")
-                        GameTooltip:AddLine("|cff00ff00★ BiS: "..tip.bisTier.."|r", 0, 1, 0)
+                        GameTooltip:AddLine("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:0:0:0:0:64:64:4:60:4:60|t|cff00ff00 BiS: "..tip.bisTier.."|r", 0, 1, 0)
                     end
                     GameTooltip:Show()
                 end
