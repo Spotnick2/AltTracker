@@ -616,19 +616,22 @@ function AltTracker.CreateRow(parent, height, columns)
                         GameTooltip:AddLine("|cff00ff00★ BiS: "..tip.bisTier.."|r", 0, 1, 0)
                     end
                     GameTooltip:Show()
-                elseif tip.itemLink and tip.itemLink ~= "" then
-                    -- Extract item ID for safe tooltip display
-                    local itemID = tip.itemLink:match("item:(%d+)")
-                    if itemID then
-                        GameTooltip:SetOwner(tip, "ANCHOR_RIGHT")
-                        GameTooltip:SetHyperlink("item:"..itemID)
-                        -- Append BiS info below the standard tooltip
-                        if tip.bisTier then
-                            GameTooltip:AddLine(" ")
-                            GameTooltip:AddLine("|cff00ff00★ BiS: "..tip.bisTier.."|r", 0, 1, 0)
-                        end
-                        GameTooltip:Show()
+                elseif (tip.itemLink and tip.itemLink:match("item:(%d+)"))
+                    or (tip.gearID and tip.gearID > 0) then
+                    -- Prefer the local full item link (carries this client's
+                    -- gems/enchants); for a remote/synced character we have no
+                    -- link, so fall back to the synced item id, which always
+                    -- reflects the character's CURRENT gear.
+                    local itemID = (tip.itemLink and tip.itemLink:match("item:(%d+)"))
+                                   or tostring(tip.gearID)
+                    GameTooltip:SetOwner(tip, "ANCHOR_RIGHT")
+                    GameTooltip:SetHyperlink("item:"..itemID)
+                    -- Append BiS info below the standard tooltip
+                    if tip.bisTier then
+                        GameTooltip:AddLine(" ")
+                        GameTooltip:AddLine("|cff00ff00★ BiS: "..tip.bisTier.."|r", 0, 1, 0)
                     end
+                    GameTooltip:Show()
                 elseif tip.slotIlvl and tip.slotIlvl > 0 then
                     -- Fallback for items without a stored link
                     local qColor = QUALITY_COLORS[tip.slotQuality or 1] or "|cffffffff"
@@ -815,6 +818,7 @@ function AltTracker.RenderRow(row, char, index, columns)
                 row.gearTips[i].slotQuality       = q
                 row.gearTips[i].itemName          = itemName
                 row.gearTips[i].itemLink          = itemLink
+                row.gearTips[i].gearID            = char["gearid_"..slotKey] or 0
                 row.gearTips[i].bisTier           = bisTier
                 row.gearTips[i].bisName           = bisName
                 row.gearTips[i].slotID            = col.slotID

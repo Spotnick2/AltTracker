@@ -468,26 +468,30 @@ end
 eq(reqTarget, "Bob-Realm", "peer-online whispers the REQ to the full Name-Realm whitelist entry")
 
 ------------------------------------------------------------
--- 23. Merge drops stale per-slot gear fields; keeps local-only + metadata (M6)
+-- 23. Merge drops stale per-slot gear fields — including a stale local-only
+--     gearlink from an old sync — but keeps metadata (M6 + cross-account
+--     stale-tooltip fix)
 ------------------------------------------------------------
 
 WoW.reset()
 AltTrackerDB = { ["Player-Stale-1"] = {
     guid = "Player-Stale-1", name = "Stale", class = "WARRIOR", level = 70,
     gearid_head = 111, gearname_head = "Old Helm", gearq_head = 4,
-    gearlink_head = "|Hitem:111|h",  -- local-only, must survive the merge
+    -- A stale link left over from an old addon version that synced links; on a
+    -- received (remote) record this is never trustworthy and must be cleared.
+    gearlink_head = "|Hitem:111|h[Felheart Horns]|h",
     account = 2,                     -- metadata, must survive when peer omits it
     lastUpdate = 1000,
 } }
--- Incoming record has unequipped the head slot and is untagged (no account).
+-- Incoming record has re-geared the head slot (new id/name/ilvl, no link).
 T.DeserializeFullDB(T.SerializeChar(
-    { guid = "Player-Stale-1", name = "Stale", class = "WARRIOR", level = 70, lastUpdate = 1000 }
+    { guid = "Player-Stale-1", name = "Stale", class = "WARRIOR", level = 70,
+      gearid_head = 999, gearname_head = "Hood of the Corruptor", gearq_head = 4, lastUpdate = 1000 }
 ) .. "\n" .. T.CHAR_SEP, "Peer")
 local rec = AltTrackerDB["Player-Stale-1"]
-eq(rec.gearid_head,   nil, "stale gearid_ for an unequipped slot is cleared")
-eq(rec.gearname_head, nil, "stale gearname_ is cleared")
-eq(rec.gearq_head,    nil, "stale gearq_ is cleared")
-eq(rec.gearlink_head, "|Hitem:111|h", "local-only gearlink_ is preserved across merge")
+eq(rec.gearid_head,   999, "synced item id replaces the old one")
+eq(rec.gearname_head, "Hood of the Corruptor", "synced item name replaces the old one")
+eq(rec.gearlink_head, nil, "stale local-only gearlink_ is cleared on merge (fixes cross-account stale tooltip)")
 eq(rec.account,       2,   "metadata (account) is preserved when the incoming record omits it")
 
 ------------------------------------------------------------

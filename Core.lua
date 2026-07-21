@@ -353,11 +353,16 @@ end
 -- unequipped or a profession it dropped would retain its stale field, because
 -- the merge only writes keys that ARE present in the new data.
 --
--- Deliberately preserves:
---   * gearlink_* — local-only (never synced), so we must not drop it here.
---   * everything else (account, guild, money, name, class, …) — metadata the
---     incoming record overwrites when present and should otherwise keep, so a
---     peer that hasn't tagged a character doesn't wipe our account assignment.
+-- This runs ONLY on the receive/merge path, i.e. for REMOTE characters synced
+-- from another account. That's why gearlink_* is cleared too: a full item link
+-- is only ever populated by a LOCAL scan (ScanCharacter writes those directly,
+-- not through this merge), so on a synced record any gearlink_ is stale — it
+-- lingers from older addon versions that used to sync links, and would make the
+-- gear tooltip show ancient gear even though the synced ilvl/name/id are current.
+--
+-- Preserves metadata (account, guild, money, name, class, …): the incoming
+-- record overwrites those when present, and a peer that hasn't tagged a
+-- character shouldn't wipe our local account assignment.
 local function ClearSyncedStateFields(t)
     t.prof1 = nil; t.prof2 = nil
     t.prof1Skill = nil; t.prof2Skill = nil
@@ -365,7 +370,8 @@ local function ClearSyncedStateFields(t)
     for k in pairs(t) do
         if k:find("^prof_") or k:find("^profmax_")
         or k:find("^gear_") or k:find("^gearq_")
-        or k:find("^gearname_") or k:find("^gearid_") then
+        or k:find("^gearname_") or k:find("^gearid_")
+        or k:find("^gearlink_") then
             t[k] = nil
         end
     end
