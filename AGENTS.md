@@ -129,3 +129,29 @@ AddOns list). Core is copied additively; plugin folders are mirrored (stale file
   `.github/copilot-instructions.md`.
 - **Deploy is a file copy** to the WoW AddOns folder (`pwsh Tools/deploy.ps1`) — low-stakes,
   no build.
+
+## Cost control & model usage
+
+Right-sizing applies to spend too — this is a small single-maintainer addon, so keep token
+and context use lean.
+
+- **Prefer inline tools over subagents.** Read, Grep, Glob, and Bash are cheaper than spawning
+  an agent (see "Agent workflow tips" above). Only spawn one for a genuinely broad survey or
+  parallel independent research — don't fan out for fan-out's sake; each agent starts cold and
+  the coordination overhead often exceeds the benefit for a repo this size.
+- **Cap parallelism.** Don't spawn more than ~2 subagents in one turn.
+- **Compact / start fresh after heavy work.** Compact after a large exploration phase, big diff,
+  or repeated syntax-check/test loops before moving on; start a clean session when switching to an
+  unrelated task rather than carrying a huge context forward.
+- **Match the model to the work — cheap for mechanical, strong for tricky:**
+  - *Cheap/fast model (Haiku):* mechanical, low-judgment work — file-finding and symbol/usage
+    searches, small rote edits, and **deploy / file-copy tasks** (`Tools/deploy.ps1` is delegated
+    to Haiku here; a cheap model is right for a no-build file copy).
+  - *Mid model (Sonnet):* routine implementation — new columns, renderers, config plumbing,
+    straightforward test additions.
+  - *Strong model (Opus):* tricky reasoning and audits — the `Core.lua` sync/serialization engine,
+    protocol-version and chunking changes, difficult debugging, and final review of a large diff.
+- **Escalate to the strong model only when the task warrants it:** protocol/sync behavior, risky
+  cross-cutting changes, ambiguous debugging, or reviewing a meaningful diff. Keep tight, specific
+  prompts for cheaper models — a narrow question returns a better answer and costs less than a
+  broad survey.
