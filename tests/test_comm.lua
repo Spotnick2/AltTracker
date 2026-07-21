@@ -58,14 +58,20 @@ local function dbCount()
     return n
 end
 
--- Split captured wire into its CHUNK3 messages and the DONE message.
+-- Split captured wire into its CHUNK messages and the DONE message.
+local CHUNK_PREFIX = T.MSG_CHUNK_V .. "|"
 local function splitWire(messages)
     local chunks, done = {}, nil
     for _, m in ipairs(messages) do
-        if m:sub(1, 7) == "CHUNK3|" then chunks[#chunks + 1] = m
+        if m:sub(1, #CHUNK_PREFIX) == CHUNK_PREFIX then chunks[#chunks + 1] = m
         else done = m end
     end
     return chunks, done
+end
+
+-- Pull the stream id out of a captured CHUNK message.
+local function sidOf(chunkMessage)
+    return chunkMessage:match("^" .. T.MSG_CHUNK_V .. "|(%d+)|")
 end
 
 -- Populate AltTrackerDB with n fresh characters using a unique guid prefix.
@@ -225,12 +231,12 @@ eq(dbCount(), 0, "DB is not updated when a chunk is missing")
 WoW.flushTimers()  -- run the queued resync request
 local reqSent = false
 for _, m in ipairs(WoW.sentMessages()) do
-    if m == "REQ" .. T.PROTOCOL_VERSION then reqSent = true end
+    if m == T.MSG_REQUEST_V then reqSent = true end
 end
 check(reqSent, "receiver auto-requests a resync after a drop")
 
 ------------------------------------------------------------
--- 10. Checksum mismatch discards the data
+-- 10. Checksum mismatch discards the data AND auto-requests a resync (H2)
 ------------------------------------------------------------
 
 WoW.reset()
@@ -238,13 +244,21 @@ seedDB("Player-C-", 3)
 T.ChunkAndSendPayload(T.SerializeFullDB(false), "WHISPER", "Corrupt")
 WoW.flushTimers()
 local cChunks = splitWire(WoW.sentMessages())
+local cSid = sidOf(cChunks[1])
 
 AltTrackerDB = {}
 WoW.chat = {}
+WoW.sent = {}
 for _, m in ipairs(cChunks) do receive(m, "Corrupt-Realm") end
-receive("DONE" .. T.PROTOCOL_VERSION .. "|DEADBEEF", "Corrupt-Realm")  -- wrong checksum
+receive(T.MSG_DONE_V .. "|" .. cSid .. "|DEADBEEF", "Corrupt-Realm")  -- correct sid, wrong checksum
 check(chatHas("mismatch"), "checksum mismatch is detected")
 eq(dbCount(), 0, "data is discarded on checksum mismatch")
+WoW.flushTimers()   -- run the queued resync request
+local cReq = false
+for _, m in ipairs(WoW.sentMessages()) do
+    if m == T.MSG_REQUEST_V then cReq = true end
+end
+check(cReq, "checksum mismatch now auto-requests a resync (H2 fix)")
 
 ------------------------------------------------------------
 -- 11. Packets from ourselves are ignored
@@ -252,8 +266,8 @@ eq(dbCount(), 0, "data is discarded on checksum mismatch")
 
 WoW.reset()
 AltTrackerDB = {}
-receive("CHUNK3|1/1|" .. T.Base64Encode("guid:Player-Self\nname:Me\n"), "Tester-Realm")
-receive("DONE" .. T.PROTOCOL_VERSION .. "|00000000", "Tester-Realm")
+receive(T.MSG_CHUNK_V .. "|1|1/1|" .. T.Base64Encode("guid:Player-Self\nname:Me\n"), "Tester-Realm")
+receive(T.MSG_DONE_V .. "|1|00000000", "Tester-Realm")
 eq(dbCount(), 0, "our own packets (sender == player) are ignored")
 
 ------------------------------------------------------------
@@ -338,10 +352,10 @@ check(chatHas("name changed") or chatHas("Rejected"), "name-change rejection rep
 
 WoW.reset()
 AltTrackerDB = {}
-receive("CHUNK3|not-a-valid-header", "Junk-Realm")
+receive(T.MSG_CHUNK_V .. "|1|not-a-valid-header", "Junk-Realm")
 check(chatHas("Malformed"), "malformed chunk header is reported")
 WoW.chat = {}
-receive("CHUNK3|9/3|" .. T.Base64Encode("x"), "Junk-Realm")
+receive(T.MSG_CHUNK_V .. "|1|9/3|" .. T.Base64Encode("x"), "Junk-Realm")
 check(chatHas("Out-of-range"), "out-of-range seq (seq > total) is reported")
 eq(T.Base64Decode("@@@@"), nil, "malformed base64 body decodes to nil")
 
@@ -351,7 +365,7 @@ eq(T.Base64Decode("@@@@"), nil, "malformed base64 body decodes to nil")
 
 WoW.reset()
 AltTrackerDB = {}
-receive("DONE" .. T.PROTOCOL_VERSION .. "|00000000", "Ghost-Realm")
+receive(T.MSG_DONE_V .. "|1|00000000", "Ghost-Realm")
 eq(dbCount(), 0, "DONE with no buffered chunks stores nothing and does not error")
 
 ------------------------------------------------------------
@@ -371,6 +385,45 @@ for i = 2, #dupChunks do receive(dupChunks[i], "Dup-Realm") end
 receive(dupDone, "Dup-Realm")
 check(not chatHas("mismatch"), "duplicate chunk does not corrupt reassembly")
 eq(dbCount(), 4, "duplicate chunk delivery is idempotent")
+
+------------------------------------------------------------
+-- 20. Two interleaved streams from one sender do not clobber (H1)
+------------------------------------------------------------
+
+WoW.reset()
+-- Stream A: chars IA1..IA3
+AltTrackerDB = {}
+for i = 1, 3 do local g = "Player-IA-" .. i; AltTrackerDB[g] = { guid = g, name = "IA" .. i, class = "MAGE",  level = 60, ilvl = 100, lastUpdate = 1 } end
+T.ChunkAndSendPayload(T.SerializeFullDB(false), "WHISPER", "Inter")
+WoW.flushTimers()
+local aChunks, aDone = splitWire(WoW.sentMessages())
+-- Stream B: a DIFFERENT set of chars IB1..IB3, same sender
+WoW.sent = {}
+AltTrackerDB = {}
+for i = 1, 3 do local g = "Player-IB-" .. i; AltTrackerDB[g] = { guid = g, name = "IB" .. i, class = "ROGUE", level = 60, ilvl = 100, lastUpdate = 1 } end
+T.ChunkAndSendPayload(T.SerializeFullDB(false), "WHISPER", "Inter")
+WoW.flushTimers()
+local bChunks, bDone = splitWire(WoW.sentMessages())
+check(sidOf(aChunks[1]) ~= sidOf(bChunks[1]), "the two streams carry distinct stream ids")
+
+-- Deliver the two streams' chunks interleaved, then both DONEs.
+AltTrackerDB = {}
+WoW.chat = {}
+local maxc = math.max(#aChunks, #bChunks)
+for i = 1, maxc do
+    if aChunks[i] then receive(aChunks[i], "Inter-Realm") end
+    if bChunks[i] then receive(bChunks[i], "Inter-Realm") end
+end
+receive(aDone, "Inter-Realm")
+receive(bDone, "Inter-Realm")
+check(not chatHas("mismatch"), "interleaved streams each checksum correctly (no clobbering)")
+local bothOk = true
+for i = 1, 3 do
+    if not AltTrackerDB["Player-IA-" .. i] then bothOk = false end
+    if not AltTrackerDB["Player-IB-" .. i] then bothOk = false end
+end
+check(bothOk, "both interleaved streams reassembled independently")
+eq(dbCount(), 6, "all 6 chars from two interleaved streams stored")
 
 ------------------------------------------------------------
 -- Summary

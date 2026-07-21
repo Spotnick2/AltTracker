@@ -54,21 +54,28 @@ local MSG_DONE = "DONE"
 --          [A-Za-z0-9+/=] alphabet, none of which any sane chat
 --          pipeline rewrites.  Receiver decodes back to bytes before
 --          checksum validation.
-local PROTOCOL_VERSION = "5"
-local MSG_REQUEST_V = MSG_REQUEST .. PROTOCOL_VERSION   -- "REQ5"
-local MSG_DONE_V    = MSG_DONE    .. PROTOCOL_VERSION   -- "DONE5"
-local MSG_CHUNK_V   = MSG_CHUNK   .. "3"                -- "CHUNK3"
+-- v5 → v6: each CHUNK/DONE now carries a per-stream id (sid) so the
+--          receiver keeps concurrent / retried streams from the same
+--          sender in separate reassembly buffers instead of clobbering
+--          one shared buffer.
+local PROTOCOL_VERSION = "6"
+local MSG_REQUEST_V = MSG_REQUEST .. PROTOCOL_VERSION   -- "REQ6"
+local MSG_DONE_V    = MSG_DONE    .. PROTOCOL_VERSION   -- "DONE6"
+local MSG_CHUNK_V   = MSG_CHUNK   .. "4"                -- "CHUNK4"
 
 -- WoW addon messages are capped at 255 bytes.
--- Wire packet format: "CHUNK2|<seq>/<total>|<base64-encoded-body>"
---   Header worst case: "CHUNK2|9999/9999|" = 17 bytes
+-- Wire packet format: "CHUNK4|<sid>|<seq>/<total>|<base64-encoded-body>"
+--   Header worst case: "CHUNK4|99999|9999/9999|" = 23 bytes
 --   Base64 expansion:  ceil(N/3)*4 chars per N raw bytes (~33% growth)
---   Budget per packet: 255 - 17 = 238 base64 bytes available
---   Raw chunk size:    floor(238 / 4) * 3 = 177 bytes
--- Round down to 174 for a safety margin.  Result: 174 raw payload bytes
--- per chunk, encoded to 232 b64 chars, plus 17 byte header = 249 total
--- on the wire (well under the 255 cap).
-local MAX_CHUNK = 174
+--   Budget per packet: 255 - 23 = 232 base64 bytes available
+--   Raw chunk size:    floor(232 / 4) * 3 = 174 bytes
+-- Round down to 168 for a safety margin (the sid may grow a digit or two
+-- over a long session). Result: 168 raw bytes/chunk, encoded to 224 b64
+-- chars, plus a ~23-byte header = ~247 on the wire (under the 255 cap).
+local MAX_CHUNK = 168
+
+-- Monotonic per-session stream id, one per ChunkAndSendPayload call.
+local streamCounter = 0
 local CHUNK_BURST_COUNT    = 8     -- packets allowed before we slow down
 local CHUNK_BURST_INTERVAL = 0.1   -- seconds between burst packets
 local CHUNK_STEADY_INTERVAL = 1.05 -- seconds between sustained packets
@@ -243,7 +250,7 @@ local function DeserializeChar(msg)
 
     for line in string.gmatch(msg, "([^\n]+)") do
 
-        local k, v = line:match("^([^:]+):(.+)$")
+        local k, v = line:match("^([^:]+):(.*)$")  -- (.*) so empty values round-trip
 
         if k then
             local pid = k:match("^plugin_(.+)$")
@@ -558,6 +565,11 @@ local function ChunkAndSendPayload(payload, channel, target)
     local total    = #chunks
     local checksum = ComputeChecksum(table.concat(chunks))
 
+    -- One stream id per send, echoed in every CHUNK and the DONE, so the
+    -- receiver never mixes this stream with a concurrent/retried one.
+    streamCounter = streamCounter + 1
+    local sid = streamCounter
+
     -- Pace the send schedule to stay below the addon-channel rate
     -- limiter:
     --   * Burst:  the first CHUNK_BURST_COUNT packets fire at 100ms
@@ -585,7 +597,7 @@ local function ChunkAndSendPayload(payload, channel, target)
     for idx, chunk in ipairs(chunks) do
         local delay = offsets[idx]
         C_Timer.After(delay, function()
-            local header = MSG_CHUNK_V .. "|" .. idx .. "/" .. total .. "|"
+            local header = MSG_CHUNK_V .. "|" .. sid .. "|" .. idx .. "/" .. total .. "|"
             -- Encode the raw chunk to base64 before transmission.
             -- This sidesteps any byte-level normalization the addon
             -- channel might apply (whitespace stripping, control-char
@@ -608,7 +620,7 @@ local function ChunkAndSendPayload(payload, channel, target)
     -- DONE carries the checksum.  Sent ~one steady tick after the last
     -- chunk so the channel has time to actually deliver everything.
     C_Timer.After(doneOffset, function()
-        C_ChatInfo.SendAddonMessage(PREFIX, MSG_DONE_V .. "|" .. checksum, channel, target)
+        C_ChatInfo.SendAddonMessage(PREFIX, MSG_DONE_V .. "|" .. sid .. "|" .. checksum, channel, target)
     end)
 
 end
@@ -746,6 +758,31 @@ local function ReceiveCharacter(c, sender)
 end
 
 ------------------------------------------------------------
+-- Bounded auto-resync
+--
+-- Shared by both failure paths on the receiver — missing chunks AND a
+-- checksum mismatch. Asks the peer for a fresh stream up to twice, then
+-- gives up and resets the counter. `peer` is the full Name-Realm sender,
+-- which is also a valid whisper target.
+------------------------------------------------------------
+
+local function RequestResync(peer, reason)
+    autoRetryCounts = autoRetryCounts or {}
+    autoRetryCounts[peer] = (autoRetryCounts[peer] or 0) + 1
+    if autoRetryCounts[peer] <= 2 then
+        Print("|cffff8800Sync incomplete|r from " .. peer .. " — " .. reason ..
+              " Auto-requesting resync (attempt " .. autoRetryCounts[peer] .. "/2).")
+        C_Timer.After(2, function()
+            C_ChatInfo.SendAddonMessage(PREFIX, MSG_REQUEST_V, "WHISPER", peer)
+        end)
+    else
+        Print("|cffff0000Sync failed|r from " .. peer .. " — " .. reason ..
+              " after 2 auto-retries. Try /alts sync " .. peer .. " manually.")
+        autoRetryCounts[peer] = nil
+    end
+end
+
+------------------------------------------------------------
 -- Frame
 ------------------------------------------------------------
 
@@ -814,7 +851,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
         end
 
         -- Older request from a previous protocol version — ignore
-        if cmd == MSG_REQUEST or cmd == "REQ2" or cmd == "REQ3" or cmd == "REQ4" then
+        if cmd == MSG_REQUEST or cmd == "REQ2" or cmd == "REQ3" or cmd == "REQ4" or cmd == "REQ5" then
             Print("|cffff8800[AltTracker]|r Ignoring sync request from "..senderName.." (outdated addon version).")
             return
         end
@@ -839,7 +876,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
         -- chunk under the v5 codec, so we tell the user to update both
         -- ends and move on.  Logged once per sender per session to
         -- avoid spamming the chat frame on multi-chunk streams.
-        if cmd == MSG_CHUNK or cmd == "CHUNK2" then
+        if cmd == MSG_CHUNK or cmd == "CHUNK2" or cmd == "CHUNK3" then
             local key = sender and sender:match("^([^%-]+)") or sender
             outdatedSenders = outdatedSenders or {}
             if not outdatedSenders[key] then
@@ -850,46 +887,50 @@ frame:SetScript("OnEvent", function(self, event, ...)
             return
         end
 
-        -- v5 sequenced chunk: "CHUNK3|<seq>/<total>|<base64-body>"
+        -- v6 sequenced chunk: "CHUNK4|<sid>|<seq>/<total>|<base64-body>"
         --
-        -- We strip the "<seq>/<total>|" header off `payload`, then
-        -- base64-decode the rest to recover the raw chunk bytes.
-        -- The decoded bytes are what the sender originally hashed,
-        -- so reassembly + checksum on the receiver hashes the same
-        -- byte stream.  Out-of-order and repeated arrivals are both
-        -- handled correctly: a repeat just overwrites the same slot;
-        -- an out-of-order arrival lands at its real index.
+        -- We strip the "<sid>|<seq>/<total>|" header off `payload`, then
+        -- base64-decode the rest to recover the raw chunk bytes.  The
+        -- decoded bytes are what the sender originally hashed, so
+        -- reassembly + checksum on the receiver hashes the same byte
+        -- stream.  Out-of-order and repeated arrivals within a stream are
+        -- handled (a repeat overwrites its slot; an out-of-order arrival
+        -- lands at its real index), and buffers are keyed per (sender,
+        -- sid) so two concurrent or retried streams never clobber.
         if cmd == MSG_CHUNK_V then
 
-            local key = sender and sender:match("^([^%-]+)") or sender
+            local peer = sender or "?"
 
             if not payload then return end
-            local seqStr, totalStr, encodedBody = payload:match("^(%d+)/(%d+)|(.*)$")
-            if not seqStr then
-                -- Malformed header — treat as drop, log once and discard.
-                Print("|cffff8800[AltTracker]|r Malformed chunk from "..key..", discarded.")
+            local sidStr, seqStr, totalStr, encodedBody = payload:match("^(%d+)|(%d+)/(%d+)|(.*)$")
+            if not sidStr then
+                -- Malformed header — treat as drop, log and discard.
+                Print("|cffff8800[AltTracker]|r Malformed chunk from "..peer..", discarded.")
                 return
             end
             local seq   = tonumber(seqStr)
             local total = tonumber(totalStr)
             if not seq or not total or seq < 1 or seq > total then
-                Print("|cffff8800[AltTracker]|r Out-of-range chunk seq from "..key..", discarded.")
+                Print("|cffff8800[AltTracker]|r Out-of-range chunk seq from "..peer..", discarded.")
                 return
             end
 
             local chunkBody = Base64Decode(encodedBody or "")
             if not chunkBody then
                 Print("|cffff8800[AltTracker]|r Base64 decode failed on chunk " ..
-                      seq .. "/" .. total .. " from " .. key .. ", discarding.")
+                      seq .. "/" .. total .. " from " .. peer .. ", discarding.")
                 return
             end
 
-            local buf = incomingBuffers[key]
+            local bkey = peer .. "#" .. sidStr
+            local buf = incomingBuffers[bkey]
             if not buf then
+                -- total is fixed for the life of a stream (same sid), so it
+                -- is only set at creation — never blindly overwritten by a
+                -- later/stale packet.
                 buf = { chunks = {}, total = total, lastTouched = time() }
-                incomingBuffers[key] = buf
+                incomingBuffers[bkey] = buf
             else
-                buf.total = total           -- in case sender retried with a different count
                 buf.lastTouched = time()
             end
             buf.chunks[seq] = chunkBody
@@ -902,9 +943,14 @@ frame:SetScript("OnEvent", function(self, event, ...)
         -- reported by index so the user / sender knows what got dropped.
         if cmd == MSG_DONE_V then
 
-            local key = sender and sender:match("^([^%-]+)") or sender
-            local buf = incomingBuffers[key]
-            local remoteChecksum = payload
+            local peer = sender or "?"
+            local sidStr, remoteChecksum = (payload or ""):match("^(%d+)|(.*)$")
+            if not sidStr then
+                -- Malformed DONE (no stream id) — nothing to complete.
+                return
+            end
+            local bkey = peer .. "#" .. sidStr
+            local buf = incomingBuffers[bkey]
 
             if buf and buf.total and buf.total > 0 then
 
@@ -928,35 +974,9 @@ frame:SetScript("OnEvent", function(self, event, ...)
                         for i = 1, 8 do head[i] = missing[i] end
                         detail = table.concat(head, ",") .. ",… (+" .. (#missing - 8) .. " more)"
                     end
-
-                    -- Auto-retry: ask the sender for a fresh stream up
-                    -- to 2 times before giving up.  The retry counter is
-                    -- per-sender so two senders dropping at once each get
-                    -- their own budget.  A successful reassembly elsewhere
-                    -- will reset the counter (we tear down the buffer at
-                    -- the end of every successful DONE).
-                    autoRetryCounts = autoRetryCounts or {}
-                    autoRetryCounts[key] = (autoRetryCounts[key] or 0) + 1
-                    if autoRetryCounts[key] <= 2 then
-                        Print("|cffff8800Sync incomplete|r from " .. key ..
-                              " — " .. #missing .. "/" .. buf.total ..
-                              " chunks missing (" .. detail ..
-                              "). Auto-requesting resync (attempt " ..
-                              autoRetryCounts[key] .. "/2).")
-                        incomingBuffers[key] = nil
-                        -- Send a fresh REQ4 to the same peer
-                        C_Timer.After(2, function()
-                            C_ChatInfo.SendAddonMessage(PREFIX, MSG_REQUEST_V, "WHISPER", key)
-                        end)
-                    else
-                        Print("|cffff0000Sync failed|r from " .. key ..
-                              " — " .. #missing .. "/" .. buf.total ..
-                              " chunks missing (" .. detail ..
-                              ") after 2 auto-retries. Try /alts sync " ..
-                              key .. " manually.")
-                        autoRetryCounts[key] = nil
-                        incomingBuffers[key] = nil
-                    end
+                    incomingBuffers[bkey] = nil
+                    RequestResync(peer, #missing .. "/" .. buf.total ..
+                        " chunks missing (" .. detail .. ").")
                     return
                 end
 
@@ -970,11 +990,13 @@ frame:SetScript("OnEvent", function(self, event, ...)
                 if remoteChecksum and remoteChecksum ~= "" then
                     local localChecksum = ComputeChecksum(buffer)
                     if localChecksum ~= remoteChecksum then
-                        Print("|cffff0000Checksum mismatch|r from " .. key ..
+                        Print("|cffff0000Checksum mismatch|r from " .. peer ..
                               " (expected " .. remoteChecksum ..
-                              ", got " .. localChecksum ..
-                              "). Data discarded — request a resync.")
-                        incomingBuffers[key] = nil
+                              ", got " .. localChecksum .. ").")
+                        incomingBuffers[bkey] = nil
+                        -- Same recovery as a dropped chunk: don't leave the DB
+                        -- stale, ask for a fresh stream (bounded).
+                        RequestResync(peer, "checksum mismatch.")
                         return
                     end
                 end
@@ -983,37 +1005,37 @@ frame:SetScript("OnEvent", function(self, event, ...)
                     local charPayload = buffer:sub(6)
                     local c = DeserializeChar(charPayload)
                     if c then
-                        Print(key .. " sent character data for " .. (c.name or "unknown") .. ".")
-                        ReceiveCharacter(c, key)
+                        Print(peer .. " sent character data for " .. (c.name or "unknown") .. ".")
+                        ReceiveCharacter(c, peer)
                     end
                 else
-                    Print("Receiving data from " .. key .. "...")
+                    Print("Receiving data from " .. peer .. "...")
 
                     local before = 0
                     for _ in pairs(AltTrackerDB) do before = before + 1 end
 
-                    DeserializeFullDB(buffer, key)
+                    DeserializeFullDB(buffer, peer)
 
                     local after = 0
                     for _ in pairs(AltTrackerDB) do after = after + 1 end
 
                     local newChars = after - before
                     if newChars > 0 then
-                        Print("Sync with " .. key .. " complete. " .. after .. " characters known (" .. newChars .. " new).")
+                        Print("Sync with " .. peer .. " complete. " .. after .. " characters known (" .. newChars .. " new).")
                     else
-                        Print("Sync with " .. key .. " complete. " .. after .. " characters known.")
+                        Print("Sync with " .. peer .. " complete. " .. after .. " characters known.")
                     end
                 end
             end
 
             -- Successful (or empty) DONE — clear retry budget for this peer
-            if autoRetryCounts then autoRetryCounts[key] = nil end
-            incomingBuffers[key] = nil
+            if autoRetryCounts then autoRetryCounts[peer] = nil end
+            incomingBuffers[bkey] = nil
             return
         end
 
         -- Old unversioned DONE from a previous addon version — discard buffer silently
-        if cmd == MSG_DONE or cmd == "DONE2" or cmd == "DONE3" or cmd == "DONE4" then
+        if cmd == MSG_DONE or cmd == "DONE2" or cmd == "DONE3" or cmd == "DONE4" or cmd == "DONE5" then
             local key = sender and sender:match("^([^%-]+)") or sender
             if incomingBuffers[key] then
                 incomingBuffers[key] = nil
@@ -1616,5 +1638,8 @@ AltTracker._test = {
     MAX_CHUNK           = MAX_CHUNK,
     PROTOCOL_VERSION    = PROTOCOL_VERSION,
     PREFIX             = PREFIX,
+    MSG_CHUNK_V        = MSG_CHUNK_V,
+    MSG_DONE_V         = MSG_DONE_V,
+    MSG_REQUEST_V      = MSG_REQUEST_V,
     frame              = frame,   -- drive CHAT_MSG_ADDON in receive-side tests
 }
