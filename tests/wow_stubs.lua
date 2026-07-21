@@ -129,7 +129,9 @@ UnitRace  = function() return "Orc", "Orc" end
 UnitSex   = function() return 2 end
 UnitLevel = function() return 70 end
 GetRealmName = function() return "TestRealm" end
-time = function() return os.time() end
+-- Clock: real os.time() by default, but tests can pin it via WoW.now = <epoch>
+-- (and advance it) to drive time-dependent logic like the sync-watch deadline.
+time = function() return WoW.now or os.time() end
 
 ------------------------------------------------------------
 -- Test-control helpers
@@ -139,6 +141,7 @@ function WoW.reset()
     WoW.loaded, WoW.loadCalls, WoW.timers, WoW.chat, WoW.sent, WoW.loggedIn =
         {}, {}, {}, {}, {}, true
     WoW.sendResult = true
+    WoW.now = nil   -- unpin the clock (fall back to os.time())
 end
 
 -- All captured wire messages (the `message` field of each SendAddonMessage).

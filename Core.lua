@@ -76,11 +76,15 @@ local LibDeflate = LibStub and LibStub:GetLibrary("LibDeflate", true)
 
 -- WoW addon messages are capped at 255 bytes.
 -- Wire packet format: "CHUNK5|<sid>|<seq>/<total>|<encoded-bytes>"
---   Header worst case: "CHUNK5|99999|9999/9999|" = 23 bytes
---   The body is now opaque compressed+encoded bytes (no base64 expansion), so
---   the whole 255-byte budget minus the header is usable: 255 - 23 = 232.
--- Use 230 for a small margin.
-local MAX_CHUNK = 230
+--   The body is opaque compressed+encoded bytes (no base64 expansion). The
+--   header "CHUNK5|<sid>|<seq>/<total>|" is NOT fixed — sid grows with the
+--   session's stream count and seq/total grow with the payload's chunk count,
+--   so a naive 23-byte assumption underestimates it. Reserve a generous 35
+--   bytes (covers e.g. "CHUNK5|99999999|99999/99999|" = 28) so header+body can
+--   never exceed 255. That matters because ChatThrottleLib *errors* on an
+--   oversize message (the old C_ChatInfo path only returned false), which would
+--   abort the whole send. 255 - 35 = 220.
+local MAX_CHUNK = 220
 
 -- Monotonic per-session stream id, one per ChunkAndSendPayload call.
 local streamCounter = 0
@@ -362,8 +366,13 @@ local function SerializeFullDB(accountOnly, sinceTS)
     local myAccount = AltTrackerConfig.accountNumber
 
     for _, c in pairs(AltTrackerDB) do
+        -- `>=` (not `>`): time() is 1-second resolution, so a character changed
+        -- in the same second the watermark was set to must still be sent. The
+        -- cost is re-sending characters that share the newest timestamp (usually
+        -- just the currently-played one) — negligible under compression, and the
+        -- merge is idempotent (last-write-wins accepts an equal timestamp).
         if type(c) == "table" and c.guid
-        and (sinceTS <= 0 or (c.lastUpdate or 0) > sinceTS) then
+        and (sinceTS <= 0 or (c.lastUpdate or 0) >= sinceTS) then
             if accountOnly and myAccount and myAccount ~= "" then
                 local charAcct = c.account
                 if charAcct and charAcct ~= "" and tostring(charAcct) ~= tostring(myAccount) then
@@ -587,9 +596,16 @@ end
 
 -- Send one wire message, paced by ChatThrottleLib when present (it queues +
 -- rate-limits), falling back to a direct send if CTL somehow isn't loaded.
+-- CTL raises a Lua error on an oversize (>255) message, so the call is wrapped:
+-- a pathological over-budget packet degrades to a direct send (which merely
+-- returns false) instead of aborting the whole ChunkAndSendPayload loop. With
+-- MAX_CHUNK=220 this is belt-and-suspenders — it should never fire.
 local function QueueWire(msg, channel, target)
     if ChatThrottleLib then
-        ChatThrottleLib:SendAddonMessage("BULK", PREFIX, msg, channel, target)
+        local ok = pcall(ChatThrottleLib.SendAddonMessage, ChatThrottleLib, "BULK", PREFIX, msg, channel, target)
+        if not ok then
+            C_ChatInfo.SendAddonMessage(PREFIX, msg, channel, target)
+        end
     else
         C_ChatInfo.SendAddonMessage(PREFIX, msg, channel, target)
     end
@@ -670,6 +686,53 @@ end
 -- like /alts sync.  Returns true if a REQ was actually sent.
 ------------------------------------------------------------
 
+-- Sync-watch: after we ask a peer for data, watch for it to arrive so the user
+-- always gets closure — a "complete" line, a "stalled" line, or a "no response"
+-- line — instead of silence when a peer is offline or still loading addons.
+-- Keyed by realm-less short name (same as the delta watermark). The deadline is
+-- pushed out on every chunk received, so an actively-transferring large sync is
+-- never falsely reported; the check only fires after SYNC_WATCH_TIMEOUT of quiet.
+local SYNC_WATCH_TIMEOUT = 45      -- seconds of silence before we report a stall
+local syncWatch = {}              -- [peerShort] = { name, deadline, sawData }
+
+local function CheckSyncWatch(short)
+    local w = syncWatch[short]
+    if not w then return end       -- cleared by CompleteStream => sync finished OK
+    local now = time()
+    if now >= w.deadline then
+        if w.sawData then
+            Print("|cffff8800Sync from " .. w.name .. " stalled|r — partial data, no completion. Try |cffffff00/alts sync " .. w.name .. "|r.")
+        else
+            Print("|cff888888No sync response from " .. w.name .. "|r — they may be offline, still loading addons, or on an older version.")
+        end
+        syncWatch[short] = nil
+    else
+        -- Activity pushed the deadline out; re-check when it next expires.
+        C_Timer.After((w.deadline - now) + 1, function() CheckSyncWatch(short) end)
+    end
+end
+
+-- Begin (or restart) watching for a response from `target`.
+local function WatchSyncPeer(target)
+    if not target then return end
+    local short = PeerShort(target)
+    local fresh = not syncWatch[short]
+    syncWatch[short] = { name = target, deadline = time() + SYNC_WATCH_TIMEOUT, sawData = false }
+    if fresh then
+        C_Timer.After(SYNC_WATCH_TIMEOUT + 1, function() CheckSyncWatch(short) end)
+    end
+end
+
+-- Called on each chunk received from a peer: push the stall deadline out and
+-- record that data is flowing, and when a stream completes: stop watching.
+local function NoteSyncActivity(peer)
+    local w = syncWatch[PeerShort(peer)]
+    if w then w.deadline = time() + SYNC_WATCH_TIMEOUT; w.sawData = true end
+end
+local function ClearSyncWatch(peer)
+    syncWatch[PeerShort(peer)] = nil
+end
+
 local function RequestCharacters(channel, target, force)
 
     channel = channel or "GUILD"
@@ -690,6 +753,7 @@ local function RequestCharacters(channel, target, force)
     -- extra payload and replies with a full DB (correct, just unoptimized).
     local wm = target and GetPeerWatermark(target) or 0
     C_ChatInfo.SendAddonMessage(PREFIX, MSG_REQUEST_V .. "|" .. wm, channel, target)
+    WatchSyncPeer(target)
     return true
 
 end
@@ -779,10 +843,12 @@ local function RequestResync(peer, reason)
         C_Timer.After(2, function()
             C_ChatInfo.SendAddonMessage(PREFIX, MSG_REQUEST_V .. "|" .. GetPeerWatermark(peer), "WHISPER", peer)
         end)
+        WatchSyncPeer(peer)   -- give the retry its own fresh stall window
     else
         Print("|cffff0000Sync failed|r from " .. peer .. " — " .. reason ..
               " after 2 auto-retries. Try /alts sync " .. peer .. " manually.")
         autoRetryCounts[peer] = nil
+        ClearSyncWatch(peer)  -- already reported failure; don't also fire the watch
     end
 end
 
@@ -847,6 +913,9 @@ local function CompleteStream(peer, bkey)
         RequestResync(peer, "undecodable data.")
         return
     end
+
+    -- A complete, decodable stream arrived — stop the stall-watch for this peer.
+    ClearSyncWatch(peer)
 
     -- Dispatch
     if buffer:sub(1, 5) == MSG_CHAR .. "\n" then
@@ -1023,6 +1092,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
                 buf.lastTouched = time()
             end
             buf.chunks[seq] = body or ""
+            NoteSyncActivity(peer)   -- keep the sync-watch stall timer alive
 
             return
         end
@@ -1134,6 +1204,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
                 local pinged = BroadcastRequest()
                 if #pinged > 0 then
                     Print("Requesting data from: " .. table.concat(pinged, ", "))
+                    Print("|cff888888Data may lag while other addons finish loading — you'll get a line per peer as each completes.|r")
                 end
             end
 
@@ -1676,6 +1747,11 @@ AltTracker._test = {
     ChunkAndSendPayload = ChunkAndSendPayload,
     RequestCharacters   = RequestCharacters,
     GetPeerWatermark    = GetPeerWatermark,
+    WatchSyncPeer       = WatchSyncPeer,
+    CheckSyncWatch      = CheckSyncWatch,
+    NoteSyncActivity    = NoteSyncActivity,
+    ClearSyncWatch      = ClearSyncWatch,
+    PeerShort           = PeerShort,
     GetSyncTargets      = GetSyncTargets,
     CHAR_SEP            = CHAR_SEP,
     MAX_CHUNK           = MAX_CHUNK,

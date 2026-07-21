@@ -610,6 +610,61 @@ for _, m in ipairs(WoW.sentMessages()) do wireBytes = wireBytes + #m end
 check(wireBytes < #raw, "compressed wire (" .. wireBytes .. "B incl. headers) is smaller than the raw payload (" .. #raw .. "B)")
 
 ------------------------------------------------------------
+-- 29. Delta boundary: a character whose lastUpdate EQUALS the watermark is
+--     still sent (>= not >), so a same-second-after-sync change isn't lost.
+------------------------------------------------------------
+
+WoW.reset()
+AltTrackerConfig = { peerWatermarks = {} }
+AltTrackerDB = {
+    ["Player-B-eq"] = { guid = "Player-B-eq", name = "Eq", class = "MAGE",  ilvl = 100, lastUpdate = 600 },
+    ["Player-B-lo"] = { guid = "Player-B-lo", name = "Lo", class = "ROGUE", ilvl = 110, lastUpdate = 500 },
+}
+local bnd = T.SerializeFullDB(false, 600)
+check(bnd:find("Player-B-eq", 1, true), "delta includes a character whose lastUpdate == the watermark (same-second fix)")
+check(not bnd:find("Player-B-lo", 1, true), "delta still excludes a character older than the watermark")
+
+------------------------------------------------------------
+-- 30. Every wire message stays within the 255-byte addon-channel cap
+--     (guards the MAX_CHUNK vs header-size budget).
+------------------------------------------------------------
+
+WoW.reset()
+seedBig("Player-Len-", 8)   -- high-entropy => multi-chunk, near-full chunks
+T.ChunkAndSendPayload(T.SerializeFullDB(false), "WHISPER", "Len")
+WoW.flushTimers()
+local oversize = nil
+for _, m in ipairs(WoW.sentMessages()) do if #m > 255 then oversize = #m end end
+check(oversize == nil, "every wire message stays within the 255-byte addon-channel cap")
+
+------------------------------------------------------------
+-- 31. Sync-watch: the user always gets closure after a request.
+------------------------------------------------------------
+
+-- 31a: a peer that never responds is reported after the timeout.
+WoW.reset(); WoW.now = 1000
+T.WatchSyncPeer("Ghost-Realm")
+WoW.now = 1100                 -- advance past the 45s stall deadline
+WoW.flushTimers()
+check(chatHas("No sync response from Ghost-Realm"), "sync-watch: an unanswered peer is reported after the timeout")
+
+-- 31b: a completed stream clears the watch, so no stall/no-response line fires.
+WoW.reset(); WoW.now = 1000
+T.WatchSyncPeer("Done-Realm")
+T.ClearSyncWatch("Done-Realm")  -- CompleteStream calls this on a finished stream
+WoW.now = 1100
+WoW.flushTimers()
+check(not chatHas("No sync response") and not chatHas("stalled"), "sync-watch: a completed sync fires no stall/no-response line")
+
+-- 31c: partial data that never completes is reported as stalled (not "no response").
+WoW.reset(); WoW.now = 1000
+T.WatchSyncPeer("Slow-Realm")
+T.NoteSyncActivity("Slow-Realm")  -- a chunk arrived: deadline pushed, sawData=true
+WoW.now = 1100
+WoW.flushTimers()
+check(chatHas("stalled"), "sync-watch: partial data with no completion is reported as stalled")
+
+------------------------------------------------------------
 -- Summary
 ------------------------------------------------------------
 
