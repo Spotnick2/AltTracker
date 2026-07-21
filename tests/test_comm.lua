@@ -665,6 +665,45 @@ WoW.flushTimers()
 check(chatHas("stalled"), "sync-watch: partial data with no completion is reported as stalled")
 
 ------------------------------------------------------------
+-- 32. Saved raid lockouts: ScanSavedInstances writes syncable si_ fields
+------------------------------------------------------------
+WoW.reset(); WoW.now = 100000
+local sguid = UnitGUID("player")   -- "Player-TEST-0001"
+AltTrackerDB = { [sguid] = { guid = sguid, name = "Raider", lastUpdate = 0 } }
+AltTrackerConfig = { peerWatermarks = {} }
+
+local savedList = {}
+_G.GetNumSavedInstances = function() return #savedList end
+_G.GetSavedInstanceInfo = function(i)
+    local e = savedList[i]
+    if not e then return end
+    -- name, id, reset, difficulty, locked, extended, idMostSig, isRaid,
+    -- maxPlayers, difficultyName, numEncounters, encounterProgress
+    return e.name, 1, e.reset, e.diff or 1, e.locked ~= false, false, 0,
+           e.isRaid ~= false, e.maxP or 10, "Normal", e.total or 0, e.prog or 0
+end
+
+savedList = {
+    { name = "Karazhan",       reset = 3600, prog = 7, total = 11, maxP = 10, isRaid = true },
+    { name = "Gruul's Lair",   reset = 7200, prog = 2, total = 2,  maxP = 25, isRaid = true },
+    { name = "Shattered Halls", reset = 3600, isRaid = false, maxP = 5 },   -- 5-man, must be ignored
+}
+T.ScanSavedInstances()
+local srec = AltTrackerDB[sguid]
+eq(srec["si_Karazhan@1"], "103560|7|11|10|Normal", "raid lockout stored as packed si_<name>@<diff> (expiry rounded to minute)")
+check(srec["si_Gruul's Lair@1"] ~= nil, "a second raid lockout is captured (name with an apostrophe)")
+check(srec["si_Shattered Halls@1"] == nil, "a 5-man (non-raid) lockout is ignored")
+
+local siPayload = T.SerializeFullDB(false, 0)
+check(siPayload:find("si_Karazhan@1:103560|7|11|10|Normal", 1, true), "si_ lockout serializes into the char record for sync")
+
+-- Reconcile on re-scan: a dropped lockout clears, a progress change updates.
+savedList = { { name = "Karazhan", reset = 3600, prog = 8, total = 11, maxP = 10, isRaid = true } }
+T.ScanSavedInstances()
+check(AltTrackerDB[sguid]["si_Gruul's Lair@1"] == nil, "a lockout no longer saved is cleared on re-scan")
+eq(AltTrackerDB[sguid]["si_Karazhan@1"], "103560|8|11|10|Normal", "boss-progress change is captured (7/11 -> 8/11)")
+
+------------------------------------------------------------
 -- Summary
 ------------------------------------------------------------
 

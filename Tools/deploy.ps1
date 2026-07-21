@@ -8,6 +8,7 @@
         <repo root>            -> AddOns/AltTracker            (core, minus Plugins/)
         Plugins/Professions/   -> AddOns/AltTrackerProfessions (Recipes, LoadOnDemand)
         Plugins/Roster/        -> AddOns/AltTrackerRoster      (Roster,  LoadOnDemand)
+        Plugins/Instances/     -> AddOns/AltTrackerInstances   (Raids,   LoadOnDemand)
 
     Usage:
         pwsh Tools/deploy.ps1
@@ -59,6 +60,7 @@ $coreExcludeFiles = @("*.log", "*.zip", "settings.ini", "*.md")
 Deploy-Tree $RepoRoot            "AltTracker"            $coreExcludeDirs $coreExcludeFiles
 Deploy-Tree (Join-Path $RepoRoot "Plugins\Professions") "AltTrackerProfessions" @() @() -Mirror
 Deploy-Tree (Join-Path $RepoRoot "Plugins\Roster")      "AltTrackerRoster"      @() @() -Mirror
+Deploy-Tree (Join-Path $RepoRoot "Plugins\Instances")   "AltTrackerInstances"   @() @() -Mirror
 
 Write-Host "Done. Deployed to $AddOnsPath" -ForegroundColor Green
 Write-Host "In-game: /reload  (keep AltTrackerProfessions & AltTrackerRoster enabled in the AddOns list)."

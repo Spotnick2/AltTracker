@@ -425,7 +425,8 @@ local function ClearSyncedStateFields(t)
         or k:find("^gear_") or k:find("^gearq_")
         or k:find("^gearname_") or k:find("^gearid_")
         or k:find("^gearlink_")
-        or k:find("^cd_") or k:find("^known_") then  -- craft cooldowns (dynamic cd_<prof>@<label>) + legacy known_ flags
+        or k:find("^cd_") or k:find("^known_")   -- craft cooldowns (dynamic cd_<prof>@<label>) + legacy known_ flags
+        or k:find("^si_") then                   -- saved raid lockouts (si_<name>@<diff>)
             t[k] = nil
         end
     end
@@ -953,6 +954,60 @@ end
 -- Frame
 ------------------------------------------------------------
 
+------------------------------------------------------------
+-- Saved raid lockouts (P2)
+--
+-- Snapshot weekly raid saved-instances into flat, syncable
+-- si_<name>@<difficulty> fields on the character record, so the Instances
+-- plugin can render a cross-alt matrix. Value is a packed
+-- "expiresAt|progress|total|maxPlayers|difficultyName" string. Absolute
+-- expiry (rounded to the minute) means every client computes "resets in …"
+-- locally and re-scans don't churn the delta sync. Raids only — the 5/hour
+-- dungeon cap is deferred (see issue #20).
+------------------------------------------------------------
+local function ScanSavedInstances()
+    local guid = UnitGUID("player")
+    local char = guid and AltTrackerDB and AltTrackerDB[guid]
+    if not char or not GetNumSavedInstances or not GetSavedInstanceInfo then return end
+
+    local now = time()
+    local newSet = {}
+    for i = 1, GetNumSavedInstances() do
+        local name, _, reset, difficulty, locked, extended, _, isRaid,
+              maxPlayers, difficultyName, numEncounters, encounterProgress = GetSavedInstanceInfo(i)
+        -- Raids only. isRaid isn't always reliable on 2.5.5, so also accept any
+        -- lockout with more than 5 max players (excludes 5-man heroics either way).
+        local raidish = isRaid or (maxPlayers and maxPlayers > 5)
+        if name and raidish and (locked or extended) and reset and reset > 0 then
+            -- Round to the minute: a later re-scan reports the same reset moment
+            -- via a smaller `reset`, so now+reset is stable and won't re-bump.
+            local expiresAt = math.floor((now + reset) / 60) * 60
+            local key = "si_" .. name .. "@" .. tostring(difficulty or 0)
+            newSet[key] = expiresAt .. "|" .. (encounterProgress or 0) .. "|"
+                       .. (numEncounters or 0) .. "|" .. (maxPlayers or 0) .. "|" .. (difficultyName or "")
+        end
+    end
+
+    local changed = false
+    for k in pairs(char) do
+        if type(k) == "string" and k:find("^si_") and newSet[k] == nil then
+            char[k] = nil; changed = true            -- lockout expired / no longer saved
+        end
+    end
+    for k, v in pairs(newSet) do
+        if char[k] ~= v then char[k] = v; changed = true end
+    end
+    if changed then
+        char.lastUpdate = time()
+        if AltTracker.RefreshSheet then AltTracker.RefreshSheet() end
+    end
+end
+AltTracker.ScanSavedInstances = ScanSavedInstances
+-- Ask the server to (re)populate saved-instance info; the reply fires
+-- UPDATE_INSTANCE_INFO, which runs ScanSavedInstances. Cheap to call on login
+-- and when the sheet opens.
+AltTracker.RequestLockouts = function() if RequestRaidInfo then RequestRaidInfo() end end
+
 local frame = CreateFrame("Frame")
 
 frame:RegisterEvent("PLAYER_LOGIN")
@@ -962,6 +1017,7 @@ frame:RegisterEvent("GET_ITEM_INFO_RECEIVED")
 frame:RegisterEvent("PLAYER_MONEY")
 frame:RegisterEvent("PLAYER_UPDATE_RESTING")
 frame:RegisterEvent("PLAYER_XP_UPDATE")
+frame:RegisterEvent("UPDATE_INSTANCE_INFO")   -- saved raid lockouts
 frame:RegisterEvent("CHAT_MSG_SYSTEM")    -- detect peer "X has come online" notifications
 
 C_ChatInfo.RegisterAddonMessagePrefix(PREFIX)
@@ -971,6 +1027,11 @@ C_ChatInfo.RegisterAddonMessagePrefix(PREFIX)
 ------------------------------------------------------------
 
 frame:SetScript("OnEvent", function(self, event, ...)
+
+    if event == "UPDATE_INSTANCE_INFO" then
+        ScanSavedInstances()
+        return
+    end
 
     if event == "CHAT_MSG_ADDON" then
 
@@ -1184,6 +1245,9 @@ frame:SetScript("OnEvent", function(self, event, ...)
             if AltTracker.ScanCharacter then
                 AltTracker.ScanCharacter()
             end
+
+            -- Populate weekly raid lockouts (reply fires UPDATE_INSTANCE_INFO).
+            if RequestRaidInfo then RequestRaidInfo() end
 
             local targets = GetSyncTargets()
             if #targets > 0 then
@@ -1421,6 +1485,7 @@ AltTracker.plugins = AltTracker.plugins or {}
 AltTracker.LOD_PLUGINS = {
     { key = "professions", addon = "AltTrackerProfessions", label = "Recipes" },
     { key = "roster",      addon = "AltTrackerRoster",      label = "Roster"  },
+    { key = "instances",   addon = "AltTrackerInstances",   label = "Raids"   },
 }
 
 -- Client-compat wrappers: the classic globals exist in 2.5.5, but fall
@@ -1639,6 +1704,7 @@ AltTracker._test = {
     ChunkAndSendPayload = ChunkAndSendPayload,
     RequestCharacters   = RequestCharacters,
     GetPeerWatermark    = GetPeerWatermark,
+    ScanSavedInstances  = ScanSavedInstances,
     WatchSyncPeer       = WatchSyncPeer,
     CheckSyncWatch      = CheckSyncWatch,
     NoteSyncActivity    = NoteSyncActivity,

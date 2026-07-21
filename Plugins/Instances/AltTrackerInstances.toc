@@ -1,0 +1,9 @@
+## Interface: 20504
+## Title: AltTracker Raids
+## Notes: Cross-alt raid-lockout matrix for AltTracker. Shows which characters are saved to which raids and when each resets, in one grid.
+## Author: (plugin)
+## Version: 1.0.0
+## Dependencies: AltTracker
+## LoadOnDemand: 1
+
+AltTrackerInstances.lua
