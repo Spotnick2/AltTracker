@@ -130,6 +130,14 @@ local function ComputeChecksum(str)
 end
 
 ------------------------------------------------------------
+-- Chat output  (declared before ValidateIncoming, which calls it)
+------------------------------------------------------------
+
+local function Print(msg)
+    DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[AltTracker]|r " .. msg)
+end
+
+------------------------------------------------------------
 -- Validation — reject incoming records whose immutable
 -- fields (class, name) have changed for an existing GUID.
 -- Returns true if the record is safe to accept.
@@ -185,14 +193,6 @@ local function GetSyncTargets()
     end
 
     return targets
-end
-
-------------------------------------------------------------
--- Chat output
-------------------------------------------------------------
-
-local function Print(msg)
-    DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[AltTracker]|r " .. msg)
 end
 
 ------------------------------------------------------------
@@ -1592,3 +1592,29 @@ SlashCmdList["ALTTRACKER"] = function(args)
     end
 
 end
+
+------------------------------------------------------------
+-- Test seam
+--
+-- Exposes the otherwise file-local sync/serialization internals so the
+-- Lua unit tests in tests/ can exercise the wire protocol without a game
+-- client. Harmless in-game — just a table of references to existing
+-- functions/values. Not part of the public plugin API.
+------------------------------------------------------------
+
+AltTracker._test = {
+    ComputeChecksum     = ComputeChecksum,
+    Base64Encode        = Base64Encode,
+    Base64Decode        = Base64Decode,
+    SerializeChar       = SerializeChar,
+    DeserializeChar     = DeserializeChar,
+    SerializeFullDB     = SerializeFullDB,
+    DeserializeFullDB   = DeserializeFullDB,
+    ChunkAndSendPayload = ChunkAndSendPayload,
+    GetSyncTargets      = GetSyncTargets,
+    CHAR_SEP            = CHAR_SEP,
+    MAX_CHUNK           = MAX_CHUNK,
+    PROTOCOL_VERSION    = PROTOCOL_VERSION,
+    PREFIX             = PREFIX,
+    frame              = frame,   -- drive CHAT_MSG_ADDON in receive-side tests
+}
