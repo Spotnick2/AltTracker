@@ -84,9 +84,6 @@ local MAX_CHUNK = 230
 
 -- Monotonic per-session stream id, one per ChunkAndSendPayload call.
 local streamCounter = 0
-local CHUNK_BURST_COUNT    = 8     -- packets allowed before we slow down
-local CHUNK_BURST_INTERVAL = 0.1   -- seconds between burst packets
-local CHUNK_STEADY_INTERVAL = 1.05 -- seconds between sustained packets
 -- When a DONE arrives but the buffer isn't complete, wait this long for
 -- late/reordered chunks before declaring the stream incomplete. Prevents a
 -- DONE that overtook an in-flight chunk from triggering a needless resync.
@@ -588,6 +585,16 @@ end
 -- order, and detect drops (a missing seq gets reported on DONE).
 ------------------------------------------------------------
 
+-- Send one wire message, paced by ChatThrottleLib when present (it queues +
+-- rate-limits), falling back to a direct send if CTL somehow isn't loaded.
+local function QueueWire(msg, channel, target)
+    if ChatThrottleLib then
+        ChatThrottleLib:SendAddonMessage("BULK", PREFIX, msg, channel, target)
+    else
+        C_ChatInfo.SendAddonMessage(PREFIX, msg, channel, target)
+    end
+end
+
 local function ChunkAndSendPayload(payload, channel, target)
 
     -- Compress the whole payload once (DEFLATE crushes the repetitive recipe
@@ -616,49 +623,16 @@ local function ChunkAndSendPayload(payload, channel, target)
     streamCounter = streamCounter + 1
     local sid = streamCounter
 
-    -- Pace the send schedule to stay below the addon-channel rate
-    -- limiter:
-    --   * Burst:  the first CHUNK_BURST_COUNT packets fire at 100ms
-    --             intervals — fits inside WoW's 10-message allowance.
-    --   * Steady: anything past that paces at 1.05s/packet so we
-    --             stay just under the 1/sec refill rate.
-    --
-    -- offsets[i] = absolute delay (seconds from now) to send chunk i.
-    local offsets = {}
-    do
-        local t = 0
-        for i = 1, total do
-            if i > 1 then
-                if i <= CHUNK_BURST_COUNT then
-                    t = t + CHUNK_BURST_INTERVAL
-                else
-                    t = t + CHUNK_STEADY_INTERVAL
-                end
-            end
-            offsets[i] = t
-        end
-    end
-    local doneOffset = (offsets[total] or 0) + CHUNK_STEADY_INTERVAL
-
+    -- Hand every chunk (then the DONE) to ChatThrottleLib at BULK priority. CTL
+    -- paces them at the game's real outbound rate — far faster than the old
+    -- 1s/chunk sleep and without over-sending — and preserves FIFO order per
+    -- destination, so the DONE reliably lands after the last chunk. No manual
+    -- C_Timer pacing needed.
     for idx, chunk in ipairs(chunks) do
-        local delay = offsets[idx]
-        C_Timer.After(delay, function()
-            local header = MSG_CHUNK_V .. "|" .. sid .. "|" .. idx .. "/" .. total .. "|"
-            -- Body is opaque compressed + addon-channel-encoded bytes; send as-is.
-            local result = C_ChatInfo.SendAddonMessage(PREFIX, header .. chunk, channel, target)
-            if result == false or result == nil then
-                Print("|cffff8800[AltTracker]|r SendAddonMessage rejected chunk " ..
-                      idx .. "/" .. total ..
-                      " (likely server-side throttle). The receiver will request a resync.")
-            end
-        end)
+        local header = MSG_CHUNK_V .. "|" .. sid .. "|" .. idx .. "/" .. total .. "|"
+        QueueWire(header .. chunk, channel, target)
     end
-
-    -- DONE carries the checksum.  Sent ~one steady tick after the last
-    -- chunk so the channel has time to actually deliver everything.
-    C_Timer.After(doneOffset, function()
-        C_ChatInfo.SendAddonMessage(PREFIX, MSG_DONE_V .. "|" .. sid .. "|" .. checksum, channel, target)
-    end)
+    QueueWire(MSG_DONE_V .. "|" .. sid .. "|" .. checksum, channel, target)
 
 end
 
@@ -1596,16 +1570,9 @@ SlashCmdList["ALTTRACKER"] = function(args)
         end
         Print("Sending your data to " .. target .. " and requesting theirs...")
         SendFullDatabase("WHISPER", target)
-        AltTrackerConfig = AltTrackerConfig or {}
-        local accountOnly = not AltTrackerConfig.sendAllAccounts
-        local nChunks = math.ceil(#SerializeFullDB(accountOnly) / MAX_CHUNK)
-        -- Mirror the pacing in ChunkAndSendPayload: first CHUNK_BURST_COUNT
-        -- chunks at burst rate, the rest at steady rate.  This is just an
-        -- estimate so the request goes out roughly when the data finishes.
-        local burst  = math.min(nChunks, CHUNK_BURST_COUNT)
-        local steady = math.max(nChunks - CHUNK_BURST_COUNT, 0)
-        local sendTime = (burst - 1) * CHUNK_BURST_INTERVAL + steady * CHUNK_STEADY_INTERVAL
-        C_Timer.After(sendTime + 1, function()
+        -- ChatThrottleLib paces the send in the background; fire the paired
+        -- request shortly after so both directions exchange.
+        C_Timer.After(3, function()
             RequestCharacters("WHISPER", target, true)
         end)
         return

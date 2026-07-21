@@ -70,6 +70,14 @@ C_ChatInfo = {
     end,
 }
 
+-- ChatThrottleLib passthrough: the real CTL paces via an OnUpdate pump we don't
+-- drive here, so in tests it just forwards to the captured SendAddonMessage.
+ChatThrottleLib = {
+    SendAddonMessage = function(_, _prio, prefix, text, chattype, target)
+        return C_ChatInfo.SendAddonMessage(prefix, text, chattype, target)
+    end,
+}
+
 -- WoW's strsplit: each char of `delim` is a separator; `limit` caps the number
 -- of returned pieces (the last piece keeps the un-split remainder). Returns
 -- multiple values.
