@@ -12,6 +12,10 @@
 
 dofile("tests/wow_stubs.lua")
 
+-- LibStub + LibDeflate (Core.lua compresses the sync payload with them).
+dofile("Libs/LibStub/LibStub.lua")
+dofile("Libs/LibDeflate/LibDeflate.lua")
+
 -- SavedVariables the addon expects to already exist.
 AltTracker       = {}
 AltTrackerDB     = {}
@@ -87,6 +91,32 @@ local function seedDB(prefix, n)
         local g = prefix .. i
         AltTrackerDB[g] = { guid = g, name = "Char" .. i, class = "WARRIOR",
                             level = 60 + i, ilvl = 100 + i, lastUpdate = 1000 }
+    end
+end
+
+-- Deterministic high-entropy hex string (defeats DEFLATE so payloads still span
+-- multiple chunks after the v7 compression).
+local function pseudo(seed)
+    local x = seed % 2147483648
+    local out = {}
+    for _ = 1, 20 do
+        x = (x * 1103515245 + 12345) % 2147483648
+        out[#out + 1] = ("0123456789abcdef"):sub((x % 16) + 1, (x % 16) + 1)
+    end
+    return table.concat(out)
+end
+
+-- Like seedDB but each character carries a large incompressible `salt`, so even
+-- a handful of characters compress to several chunks (for the multi-chunk paths).
+local function seedBig(prefix, n)
+    AltTrackerDB = {}
+    for i = 1, n do
+        local g = prefix .. i
+        local salt = {}
+        for j = 1, 12 do salt[j] = pseudo(i * 101 + j) end
+        AltTrackerDB[g] = { guid = g, name = "Char" .. i, class = "WARRIOR",
+                            level = 60 + i, ilvl = 100 + i, lastUpdate = 1000,
+                            salt = table.concat(salt) }
     end
 end
 
@@ -189,7 +219,7 @@ eq(AltTrackerDB["Player-T-1"].ilvl, 250, "incoming within 60s overwrites local")
 ------------------------------------------------------------
 
 WoW.reset()
-seedDB("Player-W-", 6)
+seedBig("Player-W-", 6)
 T.ChunkAndSendPayload(T.SerializeFullDB(false), "WHISPER", "Wire")
 WoW.flushTimers()                       -- fire the paced C_Timer.After sends
 local wire = WoW.sentMessages()
@@ -221,7 +251,7 @@ eq(dbCount(), 6, "out-of-order chunks reassemble to the full DB")
 ------------------------------------------------------------
 
 WoW.reset()
-seedDB("Player-D-", 6)
+seedBig("Player-D-", 6)
 T.ChunkAndSendPayload(T.SerializeFullDB(false), "WHISPER", "Drop")
 WoW.flushTimers()
 local dChunks, dDone = splitWire(WoW.sentMessages())
@@ -297,22 +327,23 @@ check(not mineOnly:find("Player-Acct-other", 1, true), "account filter excludes 
 check(T.SerializeFullDB(false):find("Player-Acct-other", 1, true), "unfiltered serialize includes every account")
 
 ------------------------------------------------------------
--- 13. Oversized line is byte-split across chunks and reassembled byte-exact
+-- 13. A large field survives compression + multi-chunk reassembly byte-exact
 ------------------------------------------------------------
 
 WoW.reset()
-local bigVal = string.rep("Z", 400)   -- one field far larger than MAX_CHUNK
-check(#("notes:" .. bigVal) > T.MAX_CHUNK, "the notes line exceeds MAX_CHUNK (" .. T.MAX_CHUNK .. ")")
+local bigParts = {}
+for i = 1, 60 do bigParts[i] = pseudo(i) end
+local bigVal = table.concat(bigParts)   -- ~1200 high-entropy chars
 AltTrackerDB = { ["Player-Big-1"] = { guid = "Player-Big-1", name = "Big", class = "WARRIOR", level = 70, notes = bigVal, lastUpdate = 1000 } }
 T.ChunkAndSendPayload(T.SerializeFullDB(false), "WHISPER", "Big")
 WoW.flushTimers()
 local bigChunks = splitWire(WoW.sentMessages())
-check(#bigChunks >= 3, "an oversized line is split into several chunks")
+check(#bigChunks >= 2, "a large field compresses to more than one chunk")
 AltTrackerDB = {}
 WoW.chat = {}
 for _, m in ipairs(WoW.sentMessages()) do receive(m, "Big-Realm") end
-check(not chatHas("mismatch"), "oversized-line stream checksums correctly")
-eq(AltTrackerDB["Player-Big-1"] and AltTrackerDB["Player-Big-1"].notes, bigVal, "oversized field value reassembled byte-exact")
+check(not chatHas("mismatch"), "large-field stream checksums correctly")
+eq(AltTrackerDB["Player-Big-1"] and AltTrackerDB["Player-Big-1"].notes, bigVal, "large field value reassembled byte-exact through compression")
 
 ------------------------------------------------------------
 -- 14. Merge clears stale profession fields when a peer drops a profession
@@ -382,7 +413,7 @@ eq(dbCount(), 0, "DONE with no buffered chunks stores nothing and does not error
 ------------------------------------------------------------
 
 WoW.reset()
-seedDB("Player-Dup-", 4)
+seedBig("Player-Dup-", 4)
 T.ChunkAndSendPayload(T.SerializeFullDB(false), "WHISPER", "Dup")
 WoW.flushTimers()
 local dupChunks, dupDone = splitWire(WoW.sentMessages())
@@ -439,7 +470,7 @@ eq(dbCount(), 6, "all 6 chars from two interleaved streams stored")
 ------------------------------------------------------------
 
 WoW.reset()
-seedDB("Player-Late-", 6)
+seedBig("Player-Late-", 6)
 T.ChunkAndSendPayload(T.SerializeFullDB(false), "WHISPER", "Late")
 WoW.flushTimers()
 local lChunks, lDone = splitWire(WoW.sentMessages())
@@ -564,6 +595,19 @@ for _, sdata in ipairs(WoW.sent) do
 end
 eq(reqMsg, T.MSG_REQUEST_V .. "|4242", "REQ carries our delta watermark for the peer")
 eq(T.GetPeerWatermark("Zephyr-Realm"), 4242, "GetPeerWatermark resolves by realm-less short name")
+
+------------------------------------------------------------
+-- 28. Compression shrinks the wire vs the raw payload (P0)
+------------------------------------------------------------
+
+WoW.reset()
+seedDB("Player-Zip-", 20)   -- 20 similar characters => highly compressible
+local raw = T.SerializeFullDB(false)
+T.ChunkAndSendPayload(raw, "WHISPER", "Zip")
+WoW.flushTimers()
+local wireBytes = 0
+for _, m in ipairs(WoW.sentMessages()) do wireBytes = wireBytes + #m end
+check(wireBytes < #raw, "compressed wire (" .. wireBytes .. "B incl. headers) is smaller than the raw payload (" .. #raw .. "B)")
 
 ------------------------------------------------------------
 -- Summary

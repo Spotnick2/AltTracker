@@ -5,6 +5,8 @@
 ## Version: 5.0
 ## SavedVariables: AltTrackerDB AltTrackerConfig
 
+Libs\LibStub\LibStub.lua
+Libs\LibDeflate\LibDeflate.lua
 Theme.lua
 AltTrackerRenderManifest.lua
 Core.lua

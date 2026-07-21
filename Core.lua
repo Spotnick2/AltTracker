@@ -58,25 +58,29 @@ local MSG_DONE = "DONE"
 --          [A-Za-z0-9+/=] alphabet, none of which any sane chat
 --          pipeline rewrites.  Receiver decodes back to bytes before
 --          checksum validation.
--- v5 → v6: each CHUNK/DONE now carries a per-stream id (sid) so the
---          receiver keeps concurrent / retried streams from the same
---          sender in separate reassembly buffers instead of clobbering
---          one shared buffer.
-local PROTOCOL_VERSION = "6"
-local MSG_REQUEST_V = MSG_REQUEST .. PROTOCOL_VERSION   -- "REQ6"
-local MSG_DONE_V    = MSG_DONE    .. PROTOCOL_VERSION   -- "DONE6"
-local MSG_CHUNK_V   = MSG_CHUNK   .. "4"                -- "CHUNK4"
+-- v5 → v6: each CHUNK/DONE carries a per-stream id (sid) so the receiver keeps
+--          concurrent / retried streams from the same sender in separate
+--          reassembly buffers instead of clobbering one shared buffer.
+-- v6 → v7: the whole payload is now deflate-compressed (LibDeflate) and
+--          WoW-addon-channel encoded, replacing the hand-rolled base64. Chunks
+--          carry opaque encoded bytes (byte-split, not line-aligned). The
+--          checksum is computed over the encoded stream. Huge size win on the
+--          repetitive recipe payload.
+local PROTOCOL_VERSION = "7"
+local MSG_REQUEST_V = MSG_REQUEST .. PROTOCOL_VERSION   -- "REQ7"
+local MSG_DONE_V    = MSG_DONE    .. PROTOCOL_VERSION   -- "DONE7"
+local MSG_CHUNK_V   = MSG_CHUNK   .. "5"                -- "CHUNK5"
+
+-- Compression codec (loaded before Core.lua in the .toc).
+local LibDeflate = LibStub and LibStub:GetLibrary("LibDeflate", true)
 
 -- WoW addon messages are capped at 255 bytes.
--- Wire packet format: "CHUNK4|<sid>|<seq>/<total>|<base64-encoded-body>"
---   Header worst case: "CHUNK4|99999|9999/9999|" = 23 bytes
---   Base64 expansion:  ceil(N/3)*4 chars per N raw bytes (~33% growth)
---   Budget per packet: 255 - 23 = 232 base64 bytes available
---   Raw chunk size:    floor(232 / 4) * 3 = 174 bytes
--- Round down to 168 for a safety margin (the sid may grow a digit or two
--- over a long session). Result: 168 raw bytes/chunk, encoded to 224 b64
--- chars, plus a ~23-byte header = ~247 on the wire (under the 255 cap).
-local MAX_CHUNK = 168
+-- Wire packet format: "CHUNK5|<sid>|<seq>/<total>|<encoded-bytes>"
+--   Header worst case: "CHUNK5|99999|9999/9999|" = 23 bytes
+--   The body is now opaque compressed+encoded bytes (no base64 expansion), so
+--   the whole 255-byte budget minus the header is usable: 255 - 23 = 232.
+-- Use 230 for a small margin.
+local MAX_CHUNK = 230
 
 -- Monotonic per-session stream id, one per ChunkAndSendPayload call.
 local streamCounter = 0
@@ -586,63 +590,26 @@ end
 
 local function ChunkAndSendPayload(payload, channel, target)
 
-    local lines = {}
-    for line in (payload .. "\n"):gmatch("([^\n]*)\n") do
-        lines[#lines + 1] = line
+    -- Compress the whole payload once (DEFLATE crushes the repetitive recipe
+    -- data), then make it addon-channel safe. The body is opaque bytes chunked
+    -- at byte boundaries; the receiver reassembles, checksums, decodes, and
+    -- decompresses.
+    local encoded
+    if LibDeflate then
+        encoded = LibDeflate:EncodeForWoWAddonChannel(
+            LibDeflate:CompressDeflate(payload or "", { level = 8 }))
+    else
+        encoded = payload or ""   -- defensive; LibDeflate ships in the .toc
     end
 
-    -- Build chunks no larger than MAX_CHUNK bytes.  If a single line
-    -- is itself longer than MAX_CHUNK (which happens for the
-    -- plugin_<id>:<blob> line when a character has hundreds of recipes
-    -- with reagents), we split it at byte boundaries.  The receiver
-    -- doesn't care about line boundaries inside chunks — reassembly
-    -- just concatenates back into the original byte stream — so it's
-    -- safe to split anywhere.
     local chunks = {}
-    local current = {}
-    local currentLen = 0
-
-    local function FlushCurrent()
-        if #current > 0 then
-            chunks[#chunks + 1] = table.concat(current, "\n") .. "\n"
-            current = {}
-            currentLen = 0
-        end
+    for pos = 1, #encoded, MAX_CHUNK do
+        chunks[#chunks + 1] = encoded:sub(pos, pos + MAX_CHUNK - 1)
     end
-
-    for _, line in ipairs(lines) do
-        local lineLen = #line + 1   -- include the trailing \n we'll add
-        if lineLen <= MAX_CHUNK then
-            -- Normal case: line fits within one chunk
-            if currentLen + lineLen > MAX_CHUNK and #current > 0 then
-                FlushCurrent()
-            end
-            current[#current + 1] = line
-            currentLen = currentLen + lineLen
-        else
-            -- Oversized line: flush whatever's pending, then emit the
-            -- line as standalone chunks of MAX_CHUNK raw bytes each.
-            -- Split is at byte boundaries, NOT at character boundaries,
-            -- so any UTF-8 multi-byte characters inside might land in
-            -- two halves — that's OK because the receiver doesn't
-            -- inspect chunks individually, only the reassembled stream.
-            FlushCurrent()
-            local pos = 1
-            while pos <= #line do
-                local segLen = math.min(MAX_CHUNK, #line - pos + 1)
-                local segment = line:sub(pos, pos + segLen - 1)
-                chunks[#chunks + 1] = segment
-                pos = pos + segLen
-            end
-            -- Emit the line's terminating \n as a tiny standalone chunk
-            -- so reassembly still produces "<line>\n" in the right place.
-            chunks[#chunks + 1] = "\n"
-        end
-    end
-    FlushCurrent()
+    if #chunks == 0 then chunks[1] = "" end   -- empty payload => one empty chunk
 
     local total    = #chunks
-    local checksum = ComputeChecksum(table.concat(chunks))
+    local checksum = ComputeChecksum(encoded)
 
     -- One stream id per send, echoed in every CHUNK and the DONE, so the
     -- receiver never mixes this stream with a concurrent/retried one.
@@ -677,17 +644,8 @@ local function ChunkAndSendPayload(payload, channel, target)
         local delay = offsets[idx]
         C_Timer.After(delay, function()
             local header = MSG_CHUNK_V .. "|" .. sid .. "|" .. idx .. "/" .. total .. "|"
-            -- Encode the raw chunk to base64 before transmission.
-            -- This sidesteps any byte-level normalization the addon
-            -- channel might apply (whitespace stripping, control-char
-            -- rewriting, etc.) — we observed deterministic checksum
-            -- mismatches in v4 even when all chunks arrived, with the
-            -- exact same hashes both retries, which strongly suggested
-            -- a deterministic transformation in transit.  Base64 keeps
-            -- the wire bytes inside [A-Za-z0-9+/=] which no chat
-            -- pipeline touches.
-            local encoded = Base64Encode(chunk)
-            local result = C_ChatInfo.SendAddonMessage(PREFIX, header .. encoded, channel, target)
+            -- Body is opaque compressed + addon-channel-encoded bytes; send as-is.
+            local result = C_ChatInfo.SendAddonMessage(PREFIX, header .. chunk, channel, target)
             if result == false or result == nil then
                 Print("|cffff8800[AltTracker]|r SendAddonMessage rejected chunk " ..
                       idx .. "/" .. total ..
@@ -884,14 +842,15 @@ local function CompleteStream(peer, bkey)
         return
     end
 
-    -- Reassemble in order + checksum
+    -- Reassemble in order, verify the checksum over the encoded stream, then
+    -- decode + decompress back into the original payload.
     local ordered = {}
     for i = 1, buf.total do ordered[i] = buf.chunks[i] end
-    local buffer = table.concat(ordered)
+    local encoded = table.concat(ordered)
 
     local remoteChecksum = buf.checksum
     if remoteChecksum and remoteChecksum ~= "" then
-        local localChecksum = ComputeChecksum(buffer)
+        local localChecksum = ComputeChecksum(encoded)
         if localChecksum ~= remoteChecksum then
             Print("|cffff0000Checksum mismatch|r from " .. peer ..
                   " (expected " .. remoteChecksum .. ", got " .. localChecksum .. ").")
@@ -899,6 +858,20 @@ local function CompleteStream(peer, bkey)
             RequestResync(peer, "checksum mismatch.")
             return
         end
+    end
+
+    local buffer
+    if LibDeflate then
+        local decoded = LibDeflate:DecodeForWoWAddonChannel(encoded)
+        buffer = decoded and LibDeflate:DecompressDeflate(decoded)
+    else
+        buffer = encoded
+    end
+    if not buffer then
+        Print("|cffff0000Sync data from " .. peer .. " could not be decompressed|r; discarded.")
+        incomingBuffers[bkey] = nil
+        RequestResync(peer, "undecodable data.")
+        return
     end
 
     -- Dispatch
@@ -1003,7 +976,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
         end
 
         -- Older request from a previous protocol version — ignore
-        if cmd == MSG_REQUEST or cmd == "REQ2" or cmd == "REQ3" or cmd == "REQ4" or cmd == "REQ5" then
+        if cmd == MSG_REQUEST or cmd == "REQ2" or cmd == "REQ3" or cmd == "REQ4" or cmd == "REQ5" or cmd == "REQ6" then
             Print("|cffff8800[AltTracker]|r Ignoring sync request from "..senderName.." (outdated addon version).")
             return
         end
@@ -1028,7 +1001,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
         -- chunk under the v5 codec, so we tell the user to update both
         -- ends and move on.  Logged once per sender per session to
         -- avoid spamming the chat frame on multi-chunk streams.
-        if cmd == MSG_CHUNK or cmd == "CHUNK2" or cmd == "CHUNK3" then
+        if cmd == MSG_CHUNK or cmd == "CHUNK2" or cmd == "CHUNK3" or cmd == "CHUNK4" then
             local key = sender and sender:match("^([^%-]+)") or sender
             outdatedSenders = outdatedSenders or {}
             if not outdatedSenders[key] then
@@ -1039,22 +1012,19 @@ frame:SetScript("OnEvent", function(self, event, ...)
             return
         end
 
-        -- v6 sequenced chunk: "CHUNK4|<sid>|<seq>/<total>|<base64-body>"
-        --
-        -- We strip the "<sid>|<seq>/<total>|" header off `payload`, then
-        -- base64-decode the rest to recover the raw chunk bytes.  The
-        -- decoded bytes are what the sender originally hashed, so
-        -- reassembly + checksum on the receiver hashes the same byte
-        -- stream.  Out-of-order and repeated arrivals within a stream are
-        -- handled (a repeat overwrites its slot; an out-of-order arrival
-        -- lands at its real index), and buffers are keyed per (sender,
-        -- sid) so two concurrent or retried streams never clobber.
+        -- v7 sequenced chunk: "CHUNK5|<sid>|<seq>/<total>|<encoded-bytes>"
+        -- The body is opaque compressed + addon-channel-encoded bytes; store it
+        -- as-is and concatenate on completion (then checksum + decode +
+        -- decompress). Out-of-order and repeated arrivals within a stream are
+        -- handled (a repeat overwrites its slot; an out-of-order arrival lands
+        -- at its real index); buffers are keyed per (sender, sid) so two
+        -- concurrent or retried streams never clobber.
         if cmd == MSG_CHUNK_V then
 
             local peer = sender or "?"
 
             if not payload then return end
-            local sidStr, seqStr, totalStr, encodedBody = payload:match("^(%d+)|(%d+)/(%d+)|(.*)$")
+            local sidStr, seqStr, totalStr, body = payload:match("^(%d+)|(%d+)/(%d+)|(.*)$")
             if not sidStr then
                 -- Malformed header — treat as drop, log and discard.
                 Print("|cffff8800[AltTracker]|r Malformed chunk from "..peer..", discarded.")
@@ -1064,13 +1034,6 @@ frame:SetScript("OnEvent", function(self, event, ...)
             local total = tonumber(totalStr)
             if not seq or not total or seq < 1 or seq > total then
                 Print("|cffff8800[AltTracker]|r Out-of-range chunk seq from "..peer..", discarded.")
-                return
-            end
-
-            local chunkBody = Base64Decode(encodedBody or "")
-            if not chunkBody then
-                Print("|cffff8800[AltTracker]|r Base64 decode failed on chunk " ..
-                      seq .. "/" .. total .. " from " .. peer .. ", discarding.")
                 return
             end
 
@@ -1085,7 +1048,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
             else
                 buf.lastTouched = time()
             end
-            buf.chunks[seq] = chunkBody
+            buf.chunks[seq] = body or ""
 
             return
         end
@@ -1137,7 +1100,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
         end
 
         -- Old unversioned DONE from a previous addon version — discard buffer silently
-        if cmd == MSG_DONE or cmd == "DONE2" or cmd == "DONE3" or cmd == "DONE4" or cmd == "DONE5" then
+        if cmd == MSG_DONE or cmd == "DONE2" or cmd == "DONE3" or cmd == "DONE4" or cmd == "DONE5" or cmd == "DONE6" then
             local key = sender and sender:match("^([^%-]+)") or sender
             if incomingBuffers[key] then
                 incomingBuffers[key] = nil
