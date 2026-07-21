@@ -826,18 +826,24 @@ function AltTracker.RenderRow(row, char, index, columns)
             end
 
         elseif col.field=="restPercent" or col.type=="restXP" then
-            local p   = ComputeLiveRestedPercent(char)
             local lvl = char.level or 0
-            -- Gradient: 0%=red, 75%=yellow, 150%=green
-            local r, g
-            if p <= 75 then
-                local t = p / 75
-                r = 1; g = t
+            local p   = ComputeLiveRestedPercent(char)  -- 0 at the level cap
+            if lvl >= 70 then
+                -- At the level cap rested XP doesn't apply. Show a dim
+                -- placeholder rather than a red 0%, which reads like an error.
+                value = "|cff888888—|r"
             else
-                local t = (p - 75) / 75
-                r = 1 - t; g = 1
+                -- Gradient: 0%=red, 75%=yellow, 150%=green
+                local r, g
+                if p <= 75 then
+                    local t = p / 75
+                    r = 1; g = t
+                else
+                    local t = (p - 75) / 75
+                    r = 1 - t; g = 1
+                end
+                value = string.format("|cff%02x%02x00%d%%|r", math.floor(r*255), math.floor(g*255), p)
             end
-            value = string.format("|cff%02x%02x00%d%%|r", math.floor(r*255), math.floor(g*255), p)
             if tip and lvl < 70 then
                 if p >= 150 then
                     tip.line1 = "Rested XP: " .. p .. "% (full)"
