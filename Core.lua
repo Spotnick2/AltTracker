@@ -217,7 +217,7 @@ end
 -- Serialize character
 ------------------------------------------------------------
 
-local function SerializeChar(c)
+local function SerializeChar(c, sinceTS)
 
     local parts = {}
 
@@ -235,10 +235,12 @@ local function SerializeChar(c)
     -- opaque per-character data that will round-trip through sync.  The
     -- plugin is responsible for encoding its own data into a string with
     -- no newline characters.  Lines are stored as "plugin_<id>:<blob>".
+    -- sinceTS (the requester's delta watermark) is passed through so a plugin
+    -- can skip re-sending data the peer already has (returning "").
     if AltTracker.plugins then
         for _, plugin in ipairs(AltTracker.plugins) do
             if plugin.OnSerialize and c.guid then
-                local ok, blob = pcall(plugin.OnSerialize, c.guid)
+                local ok, blob = pcall(plugin.OnSerialize, c.guid, sinceTS)
                 if ok and type(blob) == "string" and blob ~= "" and not blob:find("\n") then
                     parts[#parts+1] = "plugin_" .. plugin.id .. ":" .. blob
                 end
@@ -335,6 +337,16 @@ local function AdvancePeerWatermark(name, ts)
 end
 AltTracker.ResetPeerWatermarks = function() AltTrackerConfig.peerWatermarks = {} end
 
+-- Mark a character dirty so the next delta sync includes it. Plugins call this
+-- when their own per-character data changes (e.g. a recipe learned) so the
+-- change actually rides a delta — otherwise the character would be filtered out
+-- because its core lastUpdate didn't move.
+function AltTracker.TouchCharacter(guid)
+    if guid and AltTrackerDB[guid] then
+        AltTrackerDB[guid].lastUpdate = time()
+    end
+end
+
 -- sinceTS > 0 => delta: send only characters changed since the requester last
 -- heard from us. sinceTS <= 0 => full DB (first sync / forced resync).
 local function SerializeFullDB(accountOnly, sinceTS)
@@ -356,10 +368,10 @@ local function SerializeFullDB(accountOnly, sinceTS)
                 if charAcct and charAcct ~= "" and tostring(charAcct) ~= tostring(myAccount) then
                     -- Skip — belongs to a different account
                 else
-                    entries[#entries + 1] = SerializeChar(c)
+                    entries[#entries + 1] = SerializeChar(c, sinceTS)
                 end
             else
-                entries[#entries + 1] = SerializeChar(c)
+                entries[#entries + 1] = SerializeChar(c, sinceTS)
             end
         end
     end

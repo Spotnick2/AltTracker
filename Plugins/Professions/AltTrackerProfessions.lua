@@ -212,6 +212,30 @@ end
 -- Scanning
 ------------------------------------------------------------
 
+-- A compact signature over a profession's scanned recipes — ids AND the
+-- metadata that affects display/craft-cost (reagents, numMade, icon,
+-- difficulty). Used to decide when a character's recipes actually changed, so
+-- we only mark it dirty (and re-sync its blob) on real changes, not every scan.
+local function RecipeSig(recipeList)
+    local parts = {}
+    for _, r in ipairs(recipeList) do
+        local rg = {}
+        if r.reagents then
+            for _, x in ipairs(r.reagents) do
+                rg[#rg + 1] = (x.itemID or 0) .. ":" .. (x.count or 1)
+            end
+        end
+        parts[#parts + 1] = table.concat({
+            r.name or "", r.itemID or 0, r.spellID or 0, r.numMade or 1,
+            r.difficulty or "", r.recipeIcon or "", table.concat(rg, ","),
+        }, "\1")
+    end
+    local s = table.concat(parts, "\2")
+    local h = 0
+    for i = 1, #s do h = (h * 31 + string.byte(s, i)) % 0xFFFFFFFF end
+    return string.format("%08X-%d", h, #recipeList)
+end
+
 local function ScanCurrentTradeskill()
     if not GetTradeSkillLine then return end
     local profName = GetTradeSkillLine()
@@ -271,6 +295,17 @@ local function ScanCurrentTradeskill()
         end
     end
 
+    -- Mark the character dirty only when this profession's recipes actually
+    -- changed (set or metadata), so a played character re-syncs its recipe blob
+    -- when it learns something, but NOT on every unrelated scan/login.
+    db._recipeSig = db._recipeSig or {}
+    local sig = RecipeSig(recipeList)
+    if db._recipeSig[profName] ~= sig then
+        db._recipeSig[profName] = sig
+        db.recipesStamp = time()
+        if AltTracker.TouchCharacter then AltTracker.TouchCharacter(guid) end
+    end
+
     if AT_PROFS.isActive and AT_PROFS.RefreshResults then AT_PROFS.RefreshResults() end
 end
 
@@ -310,9 +345,15 @@ local function DeserializeReagents(blob)
     return out
 end
 
-local function SerializePlayer(guid)
+local function SerializePlayer(guid, sinceTS)
     local db = AltTrackerProfessionsDB[guid]
     if not db or not db.recipes then return "" end
+    -- Delta skip: recipesStamp rides the character's lastUpdate, so a peer whose
+    -- watermark (sinceTS) already covers it has these recipes. Returning "" omits
+    -- the recipe line entirely, and the receiver keeps its existing recipe data.
+    if sinceTS and sinceTS > 0 and (db.recipesStamp or 0) <= sinceTS then
+        return ""
+    end
     local profBlocks = {}
     for profName, recipeList in pairs(db.recipes) do
         if type(recipeList) == "table" and #recipeList > 0 then
@@ -375,7 +416,7 @@ end
 -- character. Normally driven by PLAYER_LOGIN, but also fired immediately
 -- when the addon is loaded on demand *after* login (LoadOnDemand), when
 -- PLAYER_LOGIN would never arrive again.
-local function BootstrapPlugin()
+local function BootstrapPlugin(isOnDemand)
     if not AltTracker or not AltTracker.RegisterPlugin then
         Print("AltTracker not found — make sure it is installed and enabled.")
         return
@@ -399,9 +440,28 @@ local function BootstrapPlugin()
         _isPlugin     = true,
         OnActivate    = function(mainFrame) AT_PROFS.Activate(mainFrame) end,
         OnDeactivate  = function(mainFrame) AT_PROFS.Deactivate(mainFrame) end,
-        OnSerialize   = function(g) return SerializePlayer(g) end,
+        OnSerialize   = function(g, sinceTS) return SerializePlayer(g, sinceTS) end,
         OnDeserialize = function(g, blob) DeserializePlayer(g, blob) end,
+        _test         = { SerializePlayer = SerializePlayer,
+                          DeserializePlayer = DeserializePlayer, RecipeSig = RecipeSig },
     })
+
+    -- Force a full baseline so a receiver isn't stranded with a character
+    -- watermark ahead of missing/stale recipe data — either we hold no recipe
+    -- data at all (fresh install / wiped DB) or the user just re-enabled this
+    -- plugin mid-session (isOnDemand), having missed syncs while disabled.
+    if AltTracker.ResetPeerWatermarks then
+        local hasRecipes = false
+        for _, cdb in pairs(AltTrackerProfessionsDB) do
+            if type(cdb) == "table" and type(cdb.recipes) == "table" and next(cdb.recipes) then
+                hasRecipes = true
+                break
+            end
+        end
+        if isOnDemand or not hasRecipes then
+            AltTracker.ResetPeerWatermarks()
+        end
+    end
 end
 
 local scanFrame = CreateFrame("Frame")
@@ -412,7 +472,7 @@ scanFrame:RegisterEvent("GET_ITEM_INFO_RECEIVED")
 
 scanFrame:SetScript("OnEvent", function(self, event, ...)
     if event == "PLAYER_LOGIN" then
-        C_Timer.After(1, BootstrapPlugin)
+        C_Timer.After(1, function() BootstrapPlugin(false) end)
         return
     end
     if event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_UPDATE" then
@@ -438,8 +498,9 @@ scanFrame:SetScript("OnEvent", function(self, event, ...)
 end)
 
 -- Loaded on demand after login: PLAYER_LOGIN already fired, so bootstrap now.
+-- This path is the user enabling the plugin mid-session, so force a baseline.
 if IsLoggedIn() then
-    C_Timer.After(1, BootstrapPlugin)
+    C_Timer.After(1, function() BootstrapPlugin(true) end)
 end
 
 ------------------------------------------------------------
