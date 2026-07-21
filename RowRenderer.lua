@@ -613,19 +613,22 @@ function AltTracker.CreateRow(parent, height, columns)
                     GameTooltip:SetInventoryItem("player", tip.slotID)
                     if tip.bisTier then
                         GameTooltip:AddLine(" ")
-                        GameTooltip:AddLine("|cff00ff00★ BiS: "..tip.bisTier.."|r", 0, 1, 0)
+                        GameTooltip:AddLine("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:0:0:0:0:64:64:4:60:4:60|t|cff00ff00 BiS: "..tip.bisTier.."|r", 0, 1, 0)
                     end
                     GameTooltip:Show()
                 elseif tip.itemLink and tip.itemLink ~= "" then
-                    -- Extract item ID for safe tooltip display
+                    -- Local full item link only (carries this client's
+                    -- gems/enchants). Remote/synced characters have no link and
+                    -- fall through to the text summary below — showing a plain
+                    -- SetHyperlink for them triggers WoW's item-comparison
+                    -- tooltip, which collides with the BiS side-by-side tooltip.
                     local itemID = tip.itemLink:match("item:(%d+)")
                     if itemID then
                         GameTooltip:SetOwner(tip, "ANCHOR_RIGHT")
                         GameTooltip:SetHyperlink("item:"..itemID)
-                        -- Append BiS info below the standard tooltip
                         if tip.bisTier then
                             GameTooltip:AddLine(" ")
-                            GameTooltip:AddLine("|cff00ff00★ BiS: "..tip.bisTier.."|r", 0, 1, 0)
+                            GameTooltip:AddLine("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:0:0:0:0:64:64:4:60:4:60|t|cff00ff00 BiS: "..tip.bisTier.."|r", 0, 1, 0)
                         end
                         GameTooltip:Show()
                     end
@@ -640,7 +643,7 @@ function AltTracker.CreateRow(parent, height, columns)
                     GameTooltip:AddLine(col.label.." — ilvl "..tip.slotIlvl, 0.8,0.8,0.8)
                     if tip.bisTier then
                         GameTooltip:AddLine(" ")
-                        GameTooltip:AddLine("|cff00ff00★ BiS: "..tip.bisTier.."|r", 0, 1, 0)
+                        GameTooltip:AddLine("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:0:0:0:0:64:64:4:60:4:60|t|cff00ff00 BiS: "..tip.bisTier.."|r", 0, 1, 0)
                     end
                     GameTooltip:Show()
                 end

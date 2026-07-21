@@ -12,6 +12,10 @@
 
 dofile("tests/wow_stubs.lua")
 
+-- LibStub + LibDeflate (Core.lua compresses the sync payload with them).
+dofile("Libs/LibStub/LibStub.lua")
+dofile("Libs/LibDeflate/LibDeflate.lua")
+
 -- SavedVariables the addon expects to already exist.
 AltTracker       = {}
 AltTrackerDB     = {}
@@ -74,6 +78,12 @@ local function sidOf(chunkMessage)
     return chunkMessage:match("^" .. T.MSG_CHUNK_V .. "|(%d+)|")
 end
 
+-- A REQ is now "REQ<ver>|<watermark>" (bare "REQ<ver>" also accepted).
+local function isReq(m)
+    return m == T.MSG_REQUEST_V
+        or m:sub(1, #T.MSG_REQUEST_V + 1) == T.MSG_REQUEST_V .. "|"
+end
+
 -- Populate AltTrackerDB with n fresh characters using a unique guid prefix.
 local function seedDB(prefix, n)
     AltTrackerDB = {}
@@ -81,6 +91,32 @@ local function seedDB(prefix, n)
         local g = prefix .. i
         AltTrackerDB[g] = { guid = g, name = "Char" .. i, class = "WARRIOR",
                             level = 60 + i, ilvl = 100 + i, lastUpdate = 1000 }
+    end
+end
+
+-- Deterministic high-entropy hex string (defeats DEFLATE so payloads still span
+-- multiple chunks after the v7 compression).
+local function pseudo(seed)
+    local x = seed % 2147483648
+    local out = {}
+    for _ = 1, 20 do
+        x = (x * 1103515245 + 12345) % 2147483648
+        out[#out + 1] = ("0123456789abcdef"):sub((x % 16) + 1, (x % 16) + 1)
+    end
+    return table.concat(out)
+end
+
+-- Like seedDB but each character carries a large incompressible `salt`, so even
+-- a handful of characters compress to several chunks (for the multi-chunk paths).
+local function seedBig(prefix, n)
+    AltTrackerDB = {}
+    for i = 1, n do
+        local g = prefix .. i
+        local salt = {}
+        for j = 1, 12 do salt[j] = pseudo(i * 101 + j) end
+        AltTrackerDB[g] = { guid = g, name = "Char" .. i, class = "WARRIOR",
+                            level = 60 + i, ilvl = 100 + i, lastUpdate = 1000,
+                            salt = table.concat(salt) }
     end
 end
 
@@ -183,7 +219,7 @@ eq(AltTrackerDB["Player-T-1"].ilvl, 250, "incoming within 60s overwrites local")
 ------------------------------------------------------------
 
 WoW.reset()
-seedDB("Player-W-", 6)
+seedBig("Player-W-", 6)
 T.ChunkAndSendPayload(T.SerializeFullDB(false), "WHISPER", "Wire")
 WoW.flushTimers()                       -- fire the paced C_Timer.After sends
 local wire = WoW.sentMessages()
@@ -215,7 +251,7 @@ eq(dbCount(), 6, "out-of-order chunks reassemble to the full DB")
 ------------------------------------------------------------
 
 WoW.reset()
-seedDB("Player-D-", 6)
+seedBig("Player-D-", 6)
 T.ChunkAndSendPayload(T.SerializeFullDB(false), "WHISPER", "Drop")
 WoW.flushTimers()
 local dChunks, dDone = splitWire(WoW.sentMessages())
@@ -234,7 +270,7 @@ eq(dbCount(), 0, "DB is not updated when a chunk stays missing")
 WoW.flushTimers()  -- run the queued resync request
 local reqSent = false
 for _, m in ipairs(WoW.sentMessages()) do
-    if m == T.MSG_REQUEST_V then reqSent = true end
+    if isReq(m) then reqSent = true end
 end
 check(reqSent, "receiver auto-requests a resync after a genuine drop")
 
@@ -259,7 +295,7 @@ eq(dbCount(), 0, "data is discarded on checksum mismatch")
 WoW.flushTimers()   -- run the queued resync request
 local cReq = false
 for _, m in ipairs(WoW.sentMessages()) do
-    if m == T.MSG_REQUEST_V then cReq = true end
+    if isReq(m) then cReq = true end
 end
 check(cReq, "checksum mismatch now auto-requests a resync (H2 fix)")
 
@@ -291,22 +327,23 @@ check(not mineOnly:find("Player-Acct-other", 1, true), "account filter excludes 
 check(T.SerializeFullDB(false):find("Player-Acct-other", 1, true), "unfiltered serialize includes every account")
 
 ------------------------------------------------------------
--- 13. Oversized line is byte-split across chunks and reassembled byte-exact
+-- 13. A large field survives compression + multi-chunk reassembly byte-exact
 ------------------------------------------------------------
 
 WoW.reset()
-local bigVal = string.rep("Z", 400)   -- one field far larger than MAX_CHUNK
-check(#("notes:" .. bigVal) > T.MAX_CHUNK, "the notes line exceeds MAX_CHUNK (" .. T.MAX_CHUNK .. ")")
+local bigParts = {}
+for i = 1, 60 do bigParts[i] = pseudo(i) end
+local bigVal = table.concat(bigParts)   -- ~1200 high-entropy chars
 AltTrackerDB = { ["Player-Big-1"] = { guid = "Player-Big-1", name = "Big", class = "WARRIOR", level = 70, notes = bigVal, lastUpdate = 1000 } }
 T.ChunkAndSendPayload(T.SerializeFullDB(false), "WHISPER", "Big")
 WoW.flushTimers()
 local bigChunks = splitWire(WoW.sentMessages())
-check(#bigChunks >= 3, "an oversized line is split into several chunks")
+check(#bigChunks >= 2, "a large field compresses to more than one chunk")
 AltTrackerDB = {}
 WoW.chat = {}
 for _, m in ipairs(WoW.sentMessages()) do receive(m, "Big-Realm") end
-check(not chatHas("mismatch"), "oversized-line stream checksums correctly")
-eq(AltTrackerDB["Player-Big-1"] and AltTrackerDB["Player-Big-1"].notes, bigVal, "oversized field value reassembled byte-exact")
+check(not chatHas("mismatch"), "large-field stream checksums correctly")
+eq(AltTrackerDB["Player-Big-1"] and AltTrackerDB["Player-Big-1"].notes, bigVal, "large field value reassembled byte-exact through compression")
 
 ------------------------------------------------------------
 -- 14. Merge clears stale profession fields when a peer drops a profession
@@ -376,7 +413,7 @@ eq(dbCount(), 0, "DONE with no buffered chunks stores nothing and does not error
 ------------------------------------------------------------
 
 WoW.reset()
-seedDB("Player-Dup-", 4)
+seedBig("Player-Dup-", 4)
 T.ChunkAndSendPayload(T.SerializeFullDB(false), "WHISPER", "Dup")
 WoW.flushTimers()
 local dupChunks, dupDone = splitWire(WoW.sentMessages())
@@ -433,7 +470,7 @@ eq(dbCount(), 6, "all 6 chars from two interleaved streams stored")
 ------------------------------------------------------------
 
 WoW.reset()
-seedDB("Player-Late-", 6)
+seedBig("Player-Late-", 6)
 T.ChunkAndSendPayload(T.SerializeFullDB(false), "WHISPER", "Late")
 WoW.flushTimers()
 local lChunks, lDone = splitWire(WoW.sentMessages())
@@ -463,31 +500,35 @@ onEvent(T.frame, "CHAT_MSG_SYSTEM", "Bob has come online. |Hplayer:Bob|h[Bob]|h"
 WoW.flushTimers()   -- fire the delayed re-request
 local reqTarget = nil
 for _, s in ipairs(WoW.sent) do
-    if s.message == T.MSG_REQUEST_V then reqTarget = s.target end
+    if isReq(s.message) then reqTarget = s.target end
 end
 eq(reqTarget, "Bob-Realm", "peer-online whispers the REQ to the full Name-Realm whitelist entry")
 
 ------------------------------------------------------------
--- 23. Merge drops stale per-slot gear fields; keeps local-only + metadata (M6)
+-- 23. Merge drops stale per-slot gear fields — including a stale local-only
+--     gearlink from an old sync — but keeps metadata (M6 + cross-account
+--     stale-tooltip fix)
 ------------------------------------------------------------
 
 WoW.reset()
 AltTrackerDB = { ["Player-Stale-1"] = {
     guid = "Player-Stale-1", name = "Stale", class = "WARRIOR", level = 70,
     gearid_head = 111, gearname_head = "Old Helm", gearq_head = 4,
-    gearlink_head = "|Hitem:111|h",  -- local-only, must survive the merge
+    -- A stale link left over from an old addon version that synced links; on a
+    -- received (remote) record this is never trustworthy and must be cleared.
+    gearlink_head = "|Hitem:111|h[Felheart Horns]|h",
     account = 2,                     -- metadata, must survive when peer omits it
     lastUpdate = 1000,
 } }
--- Incoming record has unequipped the head slot and is untagged (no account).
+-- Incoming record has re-geared the head slot (new id/name/ilvl, no link).
 T.DeserializeFullDB(T.SerializeChar(
-    { guid = "Player-Stale-1", name = "Stale", class = "WARRIOR", level = 70, lastUpdate = 1000 }
+    { guid = "Player-Stale-1", name = "Stale", class = "WARRIOR", level = 70,
+      gearid_head = 999, gearname_head = "Hood of the Corruptor", gearq_head = 4, lastUpdate = 1000 }
 ) .. "\n" .. T.CHAR_SEP, "Peer")
 local rec = AltTrackerDB["Player-Stale-1"]
-eq(rec.gearid_head,   nil, "stale gearid_ for an unequipped slot is cleared")
-eq(rec.gearname_head, nil, "stale gearname_ is cleared")
-eq(rec.gearq_head,    nil, "stale gearq_ is cleared")
-eq(rec.gearlink_head, "|Hitem:111|h", "local-only gearlink_ is preserved across merge")
+eq(rec.gearid_head,   999, "synced item id replaces the old one")
+eq(rec.gearname_head, "Hood of the Corruptor", "synced item name replaces the old one")
+eq(rec.gearlink_head, nil, "stale local-only gearlink_ is cleared on merge (fixes cross-account stale tooltip)")
 eq(rec.account,       2,   "metadata (account) is preserved when the incoming record omits it")
 
 ------------------------------------------------------------
@@ -506,6 +547,122 @@ receive("CHAR|" .. T.SerializeChar(
     { guid = "Player-CH-1", name = "Cee", class = "MAGE", ilvl = 260, lastUpdate = 1000 }
 ), "Peer-Realm")
 eq(AltTrackerDB["Player-CH-1"].ilvl, 260, "current single-char update is applied")
+
+------------------------------------------------------------
+-- 25. Delta sync: SerializeFullDB(sinceTS) only sends changed characters
+------------------------------------------------------------
+
+WoW.reset()
+AltTrackerConfig = { peerWatermarks = {} }
+AltTrackerDB = {
+    ["Player-DS-old"] = { guid = "Player-DS-old", name = "Old", class = "MAGE",  ilvl = 100, lastUpdate = 500 },
+    ["Player-DS-new"] = { guid = "Player-DS-new", name = "New", class = "ROGUE", ilvl = 110, lastUpdate = 900 },
+}
+local full = T.SerializeFullDB(false, 0)
+check(full:find("Player-DS-old", 1, true) and full:find("Player-DS-new", 1, true), "full sync (sinceTS 0) includes every character")
+local delta = T.SerializeFullDB(false, 600)
+check(not delta:find("Player-DS-old", 1, true), "delta excludes a character not changed since the watermark")
+check(delta:find("Player-DS-new", 1, true), "delta includes a character changed since the watermark")
+
+------------------------------------------------------------
+-- 26. Delta sync: the watermark advances after a successful receive
+------------------------------------------------------------
+
+WoW.reset()
+AltTrackerConfig = { peerWatermarks = {} }
+AltTrackerDB = {
+    ["Player-WM-1"] = { guid = "Player-WM-1", name = "W1", class = "MAGE",  ilvl = 100, lastUpdate = 700 },
+    ["Player-WM-2"] = { guid = "Player-WM-2", name = "W2", class = "ROGUE", ilvl = 110, lastUpdate = 1200 },
+}
+T.ChunkAndSendPayload(T.SerializeFullDB(false, 0), "WHISPER", "x")
+WoW.flushTimers()
+local wmWire = WoW.sentMessages()
+AltTrackerDB = {}
+for _, m in ipairs(wmWire) do receive(m, "Wmpeer-Realm") end
+eq(AltTrackerConfig.peerWatermarks["Wmpeer"], 1200, "watermark advances to the newest received lastUpdate")
+
+------------------------------------------------------------
+-- 27. Delta sync: a REQ carries our watermark for that peer
+------------------------------------------------------------
+
+WoW.reset()
+AltTrackerConfig = { peerWatermarks = { Zephyr = 4242 } }
+WoW.sent = {}
+T.RequestCharacters("WHISPER", "Zephyr-Realm", true)
+local reqMsg = nil
+for _, sdata in ipairs(WoW.sent) do
+    if isReq(sdata.message) then reqMsg = sdata.message end
+end
+eq(reqMsg, T.MSG_REQUEST_V .. "|4242", "REQ carries our delta watermark for the peer")
+eq(T.GetPeerWatermark("Zephyr-Realm"), 4242, "GetPeerWatermark resolves by realm-less short name")
+
+------------------------------------------------------------
+-- 28. Compression shrinks the wire vs the raw payload (P0)
+------------------------------------------------------------
+
+WoW.reset()
+seedDB("Player-Zip-", 20)   -- 20 similar characters => highly compressible
+local raw = T.SerializeFullDB(false)
+T.ChunkAndSendPayload(raw, "WHISPER", "Zip")
+WoW.flushTimers()
+local wireBytes = 0
+for _, m in ipairs(WoW.sentMessages()) do wireBytes = wireBytes + #m end
+check(wireBytes < #raw, "compressed wire (" .. wireBytes .. "B incl. headers) is smaller than the raw payload (" .. #raw .. "B)")
+
+------------------------------------------------------------
+-- 29. Delta boundary: a character whose lastUpdate EQUALS the watermark is
+--     still sent (>= not >), so a same-second-after-sync change isn't lost.
+------------------------------------------------------------
+
+WoW.reset()
+AltTrackerConfig = { peerWatermarks = {} }
+AltTrackerDB = {
+    ["Player-B-eq"] = { guid = "Player-B-eq", name = "Eq", class = "MAGE",  ilvl = 100, lastUpdate = 600 },
+    ["Player-B-lo"] = { guid = "Player-B-lo", name = "Lo", class = "ROGUE", ilvl = 110, lastUpdate = 500 },
+}
+local bnd = T.SerializeFullDB(false, 600)
+check(bnd:find("Player-B-eq", 1, true), "delta includes a character whose lastUpdate == the watermark (same-second fix)")
+check(not bnd:find("Player-B-lo", 1, true), "delta still excludes a character older than the watermark")
+
+------------------------------------------------------------
+-- 30. Every wire message stays within the 255-byte addon-channel cap
+--     (guards the MAX_CHUNK vs header-size budget).
+------------------------------------------------------------
+
+WoW.reset()
+seedBig("Player-Len-", 8)   -- high-entropy => multi-chunk, near-full chunks
+T.ChunkAndSendPayload(T.SerializeFullDB(false), "WHISPER", "Len")
+WoW.flushTimers()
+local oversize = nil
+for _, m in ipairs(WoW.sentMessages()) do if #m > 255 then oversize = #m end end
+check(oversize == nil, "every wire message stays within the 255-byte addon-channel cap")
+
+------------------------------------------------------------
+-- 31. Sync-watch: the user always gets closure after a request.
+------------------------------------------------------------
+
+-- 31a: a peer that never responds is reported after the timeout.
+WoW.reset(); WoW.now = 1000
+T.WatchSyncPeer("Ghost-Realm")
+WoW.now = 1100                 -- advance past the 45s stall deadline
+WoW.flushTimers()
+check(chatHas("No sync response from Ghost-Realm"), "sync-watch: an unanswered peer is reported after the timeout")
+
+-- 31b: a completed stream clears the watch, so no stall/no-response line fires.
+WoW.reset(); WoW.now = 1000
+T.WatchSyncPeer("Done-Realm")
+T.ClearSyncWatch("Done-Realm")  -- CompleteStream calls this on a finished stream
+WoW.now = 1100
+WoW.flushTimers()
+check(not chatHas("No sync response") and not chatHas("stalled"), "sync-watch: a completed sync fires no stall/no-response line")
+
+-- 31c: partial data that never completes is reported as stalled (not "no response").
+WoW.reset(); WoW.now = 1000
+T.WatchSyncPeer("Slow-Realm")
+T.NoteSyncActivity("Slow-Realm")  -- a chunk arrived: deadline pushed, sawData=true
+WoW.now = 1100
+WoW.flushTimers()
+check(chatHas("stalled"), "sync-watch: partial data with no completion is reported as stalled")
 
 ------------------------------------------------------------
 -- Summary

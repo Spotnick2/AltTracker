@@ -54,7 +54,7 @@ $coreExcludeDirs = @(
     (Join-Path $RepoRoot ".github"),
     (Join-Path $RepoRoot ".claude")
 )
-$coreExcludeFiles = @("*.log", "*.zip", "settings.ini", "UX_AUDIT.md")
+$coreExcludeFiles = @("*.log", "*.zip", "settings.ini", "*.md")
 
 Deploy-Tree $RepoRoot            "AltTracker"            $coreExcludeDirs $coreExcludeFiles
 Deploy-Tree (Join-Path $RepoRoot "Plugins\Professions") "AltTrackerProfessions" @() @() -Mirror

@@ -25,6 +25,10 @@ local function CleanupDB()
         AltTracker.ScanCharacter()
     end
 
+    -- We just wiped the DB, so forget every peer's delta watermark — the next
+    -- request must pull a FULL database again, not just deltas.
+    if AltTracker.ResetPeerWatermarks then AltTracker.ResetPeerWatermarks() end
+
     return kept
 end
 
@@ -54,31 +58,36 @@ local MSG_DONE = "DONE"
 --          [A-Za-z0-9+/=] alphabet, none of which any sane chat
 --          pipeline rewrites.  Receiver decodes back to bytes before
 --          checksum validation.
--- v5 → v6: each CHUNK/DONE now carries a per-stream id (sid) so the
---          receiver keeps concurrent / retried streams from the same
---          sender in separate reassembly buffers instead of clobbering
---          one shared buffer.
-local PROTOCOL_VERSION = "6"
-local MSG_REQUEST_V = MSG_REQUEST .. PROTOCOL_VERSION   -- "REQ6"
-local MSG_DONE_V    = MSG_DONE    .. PROTOCOL_VERSION   -- "DONE6"
-local MSG_CHUNK_V   = MSG_CHUNK   .. "4"                -- "CHUNK4"
+-- v5 → v6: each CHUNK/DONE carries a per-stream id (sid) so the receiver keeps
+--          concurrent / retried streams from the same sender in separate
+--          reassembly buffers instead of clobbering one shared buffer.
+-- v6 → v7: the whole payload is now deflate-compressed (LibDeflate) and
+--          WoW-addon-channel encoded, replacing the hand-rolled base64. Chunks
+--          carry opaque encoded bytes (byte-split, not line-aligned). The
+--          checksum is computed over the encoded stream. Huge size win on the
+--          repetitive recipe payload.
+local PROTOCOL_VERSION = "7"
+local MSG_REQUEST_V = MSG_REQUEST .. PROTOCOL_VERSION   -- "REQ7"
+local MSG_DONE_V    = MSG_DONE    .. PROTOCOL_VERSION   -- "DONE7"
+local MSG_CHUNK_V   = MSG_CHUNK   .. "5"                -- "CHUNK5"
+
+-- Compression codec (loaded before Core.lua in the .toc).
+local LibDeflate = LibStub and LibStub:GetLibrary("LibDeflate", true)
 
 -- WoW addon messages are capped at 255 bytes.
--- Wire packet format: "CHUNK4|<sid>|<seq>/<total>|<base64-encoded-body>"
---   Header worst case: "CHUNK4|99999|9999/9999|" = 23 bytes
---   Base64 expansion:  ceil(N/3)*4 chars per N raw bytes (~33% growth)
---   Budget per packet: 255 - 23 = 232 base64 bytes available
---   Raw chunk size:    floor(232 / 4) * 3 = 174 bytes
--- Round down to 168 for a safety margin (the sid may grow a digit or two
--- over a long session). Result: 168 raw bytes/chunk, encoded to 224 b64
--- chars, plus a ~23-byte header = ~247 on the wire (under the 255 cap).
-local MAX_CHUNK = 168
+-- Wire packet format: "CHUNK5|<sid>|<seq>/<total>|<encoded-bytes>"
+--   The body is opaque compressed+encoded bytes (no base64 expansion). The
+--   header "CHUNK5|<sid>|<seq>/<total>|" is NOT fixed — sid grows with the
+--   session's stream count and seq/total grow with the payload's chunk count,
+--   so a naive 23-byte assumption underestimates it. Reserve a generous 35
+--   bytes (covers e.g. "CHUNK5|99999999|99999/99999|" = 28) so header+body can
+--   never exceed 255. That matters because ChatThrottleLib *errors* on an
+--   oversize message (the old C_ChatInfo path only returned false), which would
+--   abort the whole send. 255 - 35 = 220.
+local MAX_CHUNK = 220
 
 -- Monotonic per-session stream id, one per ChunkAndSendPayload call.
 local streamCounter = 0
-local CHUNK_BURST_COUNT    = 8     -- packets allowed before we slow down
-local CHUNK_BURST_INTERVAL = 0.1   -- seconds between burst packets
-local CHUNK_STEADY_INTERVAL = 1.05 -- seconds between sustained packets
 -- When a DONE arrives but the buffer isn't complete, wait this long for
 -- late/reordered chunks before declaring the stream incomplete. Prevents a
 -- DONE that overtook an in-flight chunk from triggering a needless resync.
@@ -213,7 +222,7 @@ end
 -- Serialize character
 ------------------------------------------------------------
 
-local function SerializeChar(c)
+local function SerializeChar(c, sinceTS)
 
     local parts = {}
 
@@ -231,10 +240,12 @@ local function SerializeChar(c)
     -- opaque per-character data that will round-trip through sync.  The
     -- plugin is responsible for encoding its own data into a string with
     -- no newline characters.  Lines are stored as "plugin_<id>:<blob>".
+    -- sinceTS (the requester's delta watermark) is passed through so a plugin
+    -- can skip re-sending data the peer already has (returning "").
     if AltTracker.plugins then
         for _, plugin in ipairs(AltTracker.plugins) do
             if plugin.OnSerialize and c.guid then
-                local ok, blob = pcall(plugin.OnSerialize, c.guid)
+                local ok, blob = pcall(plugin.OnSerialize, c.guid, sinceTS)
                 if ok and type(blob) == "string" and blob ~= "" and not blob:find("\n") then
                     parts[#parts+1] = "plugin_" .. plugin.id .. ":" .. blob
                 end
@@ -308,9 +319,45 @@ end
 -- intact — never split across two packets.
 local CHAR_SEP = "==END=="
 
-local function SerializeFullDB(accountOnly)
+-- Per-peer delta-sync watermark: the newest lastUpdate VALUE we have received
+-- from that peer. It is the peer's OWN timestamp, so we never compare across
+-- machine clocks. Persisted in AltTrackerConfig.peerWatermarks, keyed by the
+-- realm-less short name so a REQ target and its reply sender map to one entry.
+local function PeerShort(name)
+    return (name and name:match("^([^%-]+)")) or name
+end
+local function GetPeerWatermark(name)
+    AltTrackerConfig = AltTrackerConfig or {}
+    AltTrackerConfig.peerWatermarks = AltTrackerConfig.peerWatermarks or {}
+    return AltTrackerConfig.peerWatermarks[PeerShort(name)] or 0
+end
+local function AdvancePeerWatermark(name, ts)
+    if not ts or ts <= 0 then return end
+    AltTrackerConfig = AltTrackerConfig or {}
+    AltTrackerConfig.peerWatermarks = AltTrackerConfig.peerWatermarks or {}
+    local short = PeerShort(name)
+    if ts > (AltTrackerConfig.peerWatermarks[short] or 0) then
+        AltTrackerConfig.peerWatermarks[short] = ts
+    end
+end
+AltTracker.ResetPeerWatermarks = function() AltTrackerConfig.peerWatermarks = {} end
+
+-- Mark a character dirty so the next delta sync includes it. Plugins call this
+-- when their own per-character data changes (e.g. a recipe learned) so the
+-- change actually rides a delta — otherwise the character would be filtered out
+-- because its core lastUpdate didn't move.
+function AltTracker.TouchCharacter(guid)
+    if guid and AltTrackerDB[guid] then
+        AltTrackerDB[guid].lastUpdate = time()
+    end
+end
+
+-- sinceTS > 0 => delta: send only characters changed since the requester last
+-- heard from us. sinceTS <= 0 => full DB (first sync / forced resync).
+local function SerializeFullDB(accountOnly, sinceTS)
 
     local entries = {}
+    sinceTS = sinceTS or 0
 
     -- When accountOnly is true, only send characters whose account field
     -- matches this client's configured account number.  Characters with
@@ -319,16 +366,22 @@ local function SerializeFullDB(accountOnly)
     local myAccount = AltTrackerConfig.accountNumber
 
     for _, c in pairs(AltTrackerDB) do
-        if type(c) == "table" and c.guid then
+        -- `>=` (not `>`): time() is 1-second resolution, so a character changed
+        -- in the same second the watermark was set to must still be sent. The
+        -- cost is re-sending characters that share the newest timestamp (usually
+        -- just the currently-played one) — negligible under compression, and the
+        -- merge is idempotent (last-write-wins accepts an equal timestamp).
+        if type(c) == "table" and c.guid
+        and (sinceTS <= 0 or (c.lastUpdate or 0) >= sinceTS) then
             if accountOnly and myAccount and myAccount ~= "" then
                 local charAcct = c.account
                 if charAcct and charAcct ~= "" and tostring(charAcct) ~= tostring(myAccount) then
                     -- Skip — belongs to a different account
                 else
-                    entries[#entries + 1] = SerializeChar(c)
+                    entries[#entries + 1] = SerializeChar(c, sinceTS)
                 end
             else
-                entries[#entries + 1] = SerializeChar(c)
+                entries[#entries + 1] = SerializeChar(c, sinceTS)
             end
         end
     end
@@ -353,11 +406,16 @@ end
 -- unequipped or a profession it dropped would retain its stale field, because
 -- the merge only writes keys that ARE present in the new data.
 --
--- Deliberately preserves:
---   * gearlink_* — local-only (never synced), so we must not drop it here.
---   * everything else (account, guild, money, name, class, …) — metadata the
---     incoming record overwrites when present and should otherwise keep, so a
---     peer that hasn't tagged a character doesn't wipe our account assignment.
+-- This runs ONLY on the receive/merge path, i.e. for REMOTE characters synced
+-- from another account. That's why gearlink_* is cleared too: a full item link
+-- is only ever populated by a LOCAL scan (ScanCharacter writes those directly,
+-- not through this merge), so on a synced record any gearlink_ is stale — it
+-- lingers from older addon versions that used to sync links, and would make the
+-- gear tooltip show ancient gear even though the synced ilvl/name/id are current.
+--
+-- Preserves metadata (account, guild, money, name, class, …): the incoming
+-- record overwrites those when present, and a peer that hasn't tagged a
+-- character shouldn't wipe our local account assignment.
 local function ClearSyncedStateFields(t)
     t.prof1 = nil; t.prof2 = nil
     t.prof1Skill = nil; t.prof2Skill = nil
@@ -365,7 +423,8 @@ local function ClearSyncedStateFields(t)
     for k in pairs(t) do
         if k:find("^prof_") or k:find("^profmax_")
         or k:find("^gear_") or k:find("^gearq_")
-        or k:find("^gearname_") or k:find("^gearid_") then
+        or k:find("^gearname_") or k:find("^gearid_")
+        or k:find("^gearlink_") then
             t[k] = nil
         end
     end
@@ -375,6 +434,7 @@ local function DeserializeFullDB(payload, sender)
 
     local current = {}
     local rejected = 0
+    local maxTS = 0   -- newest lastUpdate seen; the caller advances the peer watermark to it
 
     for line in (payload .. "\n"):gmatch("([^\n]*)\n") do
 
@@ -386,6 +446,11 @@ local function DeserializeFullDB(payload, sender)
             local c = DeserializeChar(msg)
 
             if c and c.guid then
+
+                -- Track the newest timestamp across everything the peer sent
+                -- (even rejected/skipped records) so the watermark advances past
+                -- them and they aren't re-requested next delta.
+                if (c.lastUpdate or 0) > maxTS then maxTS = c.lastUpdate end
 
                 -- Validate immutable fields before merging
                 if not ValidateIncoming(c, sender) then
@@ -425,6 +490,8 @@ local function DeserializeFullDB(payload, sender)
     if AltTracker.RefreshSheet then
         AltTracker.RefreshSheet()
     end
+
+    return maxTS
 
 end
 
@@ -527,123 +594,61 @@ end
 -- order, and detect drops (a missing seq gets reported on DONE).
 ------------------------------------------------------------
 
+-- Send one wire message, paced by ChatThrottleLib when present (it queues +
+-- rate-limits), falling back to a direct send if CTL somehow isn't loaded.
+-- CTL raises a Lua error on an oversize (>255) message, so the call is wrapped:
+-- a pathological over-budget packet degrades to a direct send (which merely
+-- returns false) instead of aborting the whole ChunkAndSendPayload loop. With
+-- MAX_CHUNK=220 this is belt-and-suspenders — it should never fire.
+local function QueueWire(msg, channel, target)
+    if ChatThrottleLib then
+        local ok = pcall(ChatThrottleLib.SendAddonMessage, ChatThrottleLib, "BULK", PREFIX, msg, channel, target)
+        if not ok then
+            C_ChatInfo.SendAddonMessage(PREFIX, msg, channel, target)
+        end
+    else
+        C_ChatInfo.SendAddonMessage(PREFIX, msg, channel, target)
+    end
+end
+
 local function ChunkAndSendPayload(payload, channel, target)
 
-    local lines = {}
-    for line in (payload .. "\n"):gmatch("([^\n]*)\n") do
-        lines[#lines + 1] = line
+    -- Compress the whole payload once (DEFLATE crushes the repetitive recipe
+    -- data), then make it addon-channel safe. The body is opaque bytes chunked
+    -- at byte boundaries; the receiver reassembles, checksums, decodes, and
+    -- decompresses.
+    local encoded
+    if LibDeflate then
+        encoded = LibDeflate:EncodeForWoWAddonChannel(
+            LibDeflate:CompressDeflate(payload or "", { level = 8 }))
+    else
+        encoded = payload or ""   -- defensive; LibDeflate ships in the .toc
     end
 
-    -- Build chunks no larger than MAX_CHUNK bytes.  If a single line
-    -- is itself longer than MAX_CHUNK (which happens for the
-    -- plugin_<id>:<blob> line when a character has hundreds of recipes
-    -- with reagents), we split it at byte boundaries.  The receiver
-    -- doesn't care about line boundaries inside chunks — reassembly
-    -- just concatenates back into the original byte stream — so it's
-    -- safe to split anywhere.
     local chunks = {}
-    local current = {}
-    local currentLen = 0
-
-    local function FlushCurrent()
-        if #current > 0 then
-            chunks[#chunks + 1] = table.concat(current, "\n") .. "\n"
-            current = {}
-            currentLen = 0
-        end
+    for pos = 1, #encoded, MAX_CHUNK do
+        chunks[#chunks + 1] = encoded:sub(pos, pos + MAX_CHUNK - 1)
     end
-
-    for _, line in ipairs(lines) do
-        local lineLen = #line + 1   -- include the trailing \n we'll add
-        if lineLen <= MAX_CHUNK then
-            -- Normal case: line fits within one chunk
-            if currentLen + lineLen > MAX_CHUNK and #current > 0 then
-                FlushCurrent()
-            end
-            current[#current + 1] = line
-            currentLen = currentLen + lineLen
-        else
-            -- Oversized line: flush whatever's pending, then emit the
-            -- line as standalone chunks of MAX_CHUNK raw bytes each.
-            -- Split is at byte boundaries, NOT at character boundaries,
-            -- so any UTF-8 multi-byte characters inside might land in
-            -- two halves — that's OK because the receiver doesn't
-            -- inspect chunks individually, only the reassembled stream.
-            FlushCurrent()
-            local pos = 1
-            while pos <= #line do
-                local segLen = math.min(MAX_CHUNK, #line - pos + 1)
-                local segment = line:sub(pos, pos + segLen - 1)
-                chunks[#chunks + 1] = segment
-                pos = pos + segLen
-            end
-            -- Emit the line's terminating \n as a tiny standalone chunk
-            -- so reassembly still produces "<line>\n" in the right place.
-            chunks[#chunks + 1] = "\n"
-        end
-    end
-    FlushCurrent()
+    if #chunks == 0 then chunks[1] = "" end   -- empty payload => one empty chunk
 
     local total    = #chunks
-    local checksum = ComputeChecksum(table.concat(chunks))
+    local checksum = ComputeChecksum(encoded)
 
     -- One stream id per send, echoed in every CHUNK and the DONE, so the
     -- receiver never mixes this stream with a concurrent/retried one.
     streamCounter = streamCounter + 1
     local sid = streamCounter
 
-    -- Pace the send schedule to stay below the addon-channel rate
-    -- limiter:
-    --   * Burst:  the first CHUNK_BURST_COUNT packets fire at 100ms
-    --             intervals — fits inside WoW's 10-message allowance.
-    --   * Steady: anything past that paces at 1.05s/packet so we
-    --             stay just under the 1/sec refill rate.
-    --
-    -- offsets[i] = absolute delay (seconds from now) to send chunk i.
-    local offsets = {}
-    do
-        local t = 0
-        for i = 1, total do
-            if i > 1 then
-                if i <= CHUNK_BURST_COUNT then
-                    t = t + CHUNK_BURST_INTERVAL
-                else
-                    t = t + CHUNK_STEADY_INTERVAL
-                end
-            end
-            offsets[i] = t
-        end
-    end
-    local doneOffset = (offsets[total] or 0) + CHUNK_STEADY_INTERVAL
-
+    -- Hand every chunk (then the DONE) to ChatThrottleLib at BULK priority. CTL
+    -- paces them at the game's real outbound rate — far faster than the old
+    -- 1s/chunk sleep and without over-sending — and preserves FIFO order per
+    -- destination, so the DONE reliably lands after the last chunk. No manual
+    -- C_Timer pacing needed.
     for idx, chunk in ipairs(chunks) do
-        local delay = offsets[idx]
-        C_Timer.After(delay, function()
-            local header = MSG_CHUNK_V .. "|" .. sid .. "|" .. idx .. "/" .. total .. "|"
-            -- Encode the raw chunk to base64 before transmission.
-            -- This sidesteps any byte-level normalization the addon
-            -- channel might apply (whitespace stripping, control-char
-            -- rewriting, etc.) — we observed deterministic checksum
-            -- mismatches in v4 even when all chunks arrived, with the
-            -- exact same hashes both retries, which strongly suggested
-            -- a deterministic transformation in transit.  Base64 keeps
-            -- the wire bytes inside [A-Za-z0-9+/=] which no chat
-            -- pipeline touches.
-            local encoded = Base64Encode(chunk)
-            local result = C_ChatInfo.SendAddonMessage(PREFIX, header .. encoded, channel, target)
-            if result == false or result == nil then
-                Print("|cffff8800[AltTracker]|r SendAddonMessage rejected chunk " ..
-                      idx .. "/" .. total ..
-                      " (likely server-side throttle). The receiver will request a resync.")
-            end
-        end)
+        local header = MSG_CHUNK_V .. "|" .. sid .. "|" .. idx .. "/" .. total .. "|"
+        QueueWire(header .. chunk, channel, target)
     end
-
-    -- DONE carries the checksum.  Sent ~one steady tick after the last
-    -- chunk so the channel has time to actually deliver everything.
-    C_Timer.After(doneOffset, function()
-        C_ChatInfo.SendAddonMessage(PREFIX, MSG_DONE_V .. "|" .. sid .. "|" .. checksum, channel, target)
-    end)
+    QueueWire(MSG_DONE_V .. "|" .. sid .. "|" .. checksum, channel, target)
 
 end
 
@@ -653,7 +658,10 @@ end
 -- target:  required for WHISPER, nil otherwise
 ------------------------------------------------------------
 
-local function SendFullDatabase(channel, target)
+-- sinceTS: when replying to a delta REQ, only the characters changed since the
+-- requester's watermark are sent. Omitted (nil) => full DB (a manual push, where
+-- we don't know what the target already has).
+local function SendFullDatabase(channel, target, sinceTS)
 
     channel = channel or "GUILD"
 
@@ -662,7 +670,7 @@ local function SendFullDatabase(channel, target)
     AltTrackerConfig = AltTrackerConfig or {}
     local accountOnly = not AltTrackerConfig.sendAllAccounts
 
-    local payload = SerializeFullDB(accountOnly)
+    local payload = SerializeFullDB(accountOnly, sinceTS)
     ChunkAndSendPayload(payload, channel, target)
 
 end
@@ -677,6 +685,53 @@ end
 -- up.  `force=true` bypasses the throttle for explicit user actions
 -- like /alts sync.  Returns true if a REQ was actually sent.
 ------------------------------------------------------------
+
+-- Sync-watch: after we ask a peer for data, watch for it to arrive so the user
+-- always gets closure — a "complete" line, a "stalled" line, or a "no response"
+-- line — instead of silence when a peer is offline or still loading addons.
+-- Keyed by realm-less short name (same as the delta watermark). The deadline is
+-- pushed out on every chunk received, so an actively-transferring large sync is
+-- never falsely reported; the check only fires after SYNC_WATCH_TIMEOUT of quiet.
+local SYNC_WATCH_TIMEOUT = 45      -- seconds of silence before we report a stall
+local syncWatch = {}              -- [peerShort] = { name, deadline, sawData }
+
+local function CheckSyncWatch(short)
+    local w = syncWatch[short]
+    if not w then return end       -- cleared by CompleteStream => sync finished OK
+    local now = time()
+    if now >= w.deadline then
+        if w.sawData then
+            Print("|cffff8800Sync from " .. w.name .. " stalled|r — partial data, no completion. Try |cffffff00/alts sync " .. w.name .. "|r.")
+        else
+            Print("|cff888888No sync response from " .. w.name .. "|r — they may be offline, still loading addons, or on an older version.")
+        end
+        syncWatch[short] = nil
+    else
+        -- Activity pushed the deadline out; re-check when it next expires.
+        C_Timer.After((w.deadline - now) + 1, function() CheckSyncWatch(short) end)
+    end
+end
+
+-- Begin (or restart) watching for a response from `target`.
+local function WatchSyncPeer(target)
+    if not target then return end
+    local short = PeerShort(target)
+    local fresh = not syncWatch[short]
+    syncWatch[short] = { name = target, deadline = time() + SYNC_WATCH_TIMEOUT, sawData = false }
+    if fresh then
+        C_Timer.After(SYNC_WATCH_TIMEOUT + 1, function() CheckSyncWatch(short) end)
+    end
+end
+
+-- Called on each chunk received from a peer: push the stall deadline out and
+-- record that data is flowing, and when a stream completes: stop watching.
+local function NoteSyncActivity(peer)
+    local w = syncWatch[PeerShort(peer)]
+    if w then w.deadline = time() + SYNC_WATCH_TIMEOUT; w.sawData = true end
+end
+local function ClearSyncWatch(peer)
+    syncWatch[PeerShort(peer)] = nil
+end
 
 local function RequestCharacters(channel, target, force)
 
@@ -693,7 +748,12 @@ local function RequestCharacters(channel, target, force)
         lastRequestedAt[target] = now
     end
 
-    C_ChatInfo.SendAddonMessage(PREFIX, MSG_REQUEST_V, channel, target)
+    -- Carry our delta watermark for this peer so they can send only what
+    -- changed since we last heard from them. A peer on older code ignores the
+    -- extra payload and replies with a full DB (correct, just unoptimized).
+    local wm = target and GetPeerWatermark(target) or 0
+    C_ChatInfo.SendAddonMessage(PREFIX, MSG_REQUEST_V .. "|" .. wm, channel, target)
+    WatchSyncPeer(target)
     return true
 
 end
@@ -781,12 +841,14 @@ local function RequestResync(peer, reason)
         Print("|cffff8800Sync incomplete|r from " .. peer .. " — " .. reason ..
               " Auto-requesting resync (attempt " .. autoRetryCounts[peer] .. "/2).")
         C_Timer.After(2, function()
-            C_ChatInfo.SendAddonMessage(PREFIX, MSG_REQUEST_V, "WHISPER", peer)
+            C_ChatInfo.SendAddonMessage(PREFIX, MSG_REQUEST_V .. "|" .. GetPeerWatermark(peer), "WHISPER", peer)
         end)
+        WatchSyncPeer(peer)   -- give the retry its own fresh stall window
     else
         Print("|cffff0000Sync failed|r from " .. peer .. " — " .. reason ..
               " after 2 auto-retries. Try /alts sync " .. peer .. " manually.")
         autoRetryCounts[peer] = nil
+        ClearSyncWatch(peer)  -- already reported failure; don't also fire the watch
     end
 end
 
@@ -820,14 +882,15 @@ local function CompleteStream(peer, bkey)
         return
     end
 
-    -- Reassemble in order + checksum
+    -- Reassemble in order, verify the checksum over the encoded stream, then
+    -- decode + decompress back into the original payload.
     local ordered = {}
     for i = 1, buf.total do ordered[i] = buf.chunks[i] end
-    local buffer = table.concat(ordered)
+    local encoded = table.concat(ordered)
 
     local remoteChecksum = buf.checksum
     if remoteChecksum and remoteChecksum ~= "" then
-        local localChecksum = ComputeChecksum(buffer)
+        local localChecksum = ComputeChecksum(encoded)
         if localChecksum ~= remoteChecksum then
             Print("|cffff0000Checksum mismatch|r from " .. peer ..
                   " (expected " .. remoteChecksum .. ", got " .. localChecksum .. ").")
@@ -836,6 +899,23 @@ local function CompleteStream(peer, bkey)
             return
         end
     end
+
+    local buffer
+    if LibDeflate then
+        local decoded = LibDeflate:DecodeForWoWAddonChannel(encoded)
+        buffer = decoded and LibDeflate:DecompressDeflate(decoded)
+    else
+        buffer = encoded
+    end
+    if not buffer then
+        Print("|cffff0000Sync data from " .. peer .. " could not be decompressed|r; discarded.")
+        incomingBuffers[bkey] = nil
+        RequestResync(peer, "undecodable data.")
+        return
+    end
+
+    -- A complete, decodable stream arrived — stop the stall-watch for this peer.
+    ClearSyncWatch(peer)
 
     -- Dispatch
     if buffer:sub(1, 5) == MSG_CHAR .. "\n" then
@@ -849,7 +929,10 @@ local function CompleteStream(peer, bkey)
         Print("Receiving data from " .. peer .. "...")
         local before = 0
         for _ in pairs(AltTrackerDB) do before = before + 1 end
-        DeserializeFullDB(buffer, peer)
+        local maxTS = DeserializeFullDB(buffer, peer)
+        -- Advance our delta watermark for this peer so the next request only
+        -- pulls what changes after this point.
+        AdvancePeerWatermark(peer, maxTS)
         local after = 0
         for _ in pairs(AltTrackerDB) do after = after + 1 end
         local newChars = after - before
@@ -914,6 +997,8 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
         -- Versioned request — only reply to clients running the same protocol
         if cmd == MSG_REQUEST_V then
+            -- payload is the requester's delta watermark (0 / absent => full DB).
+            local sinceTS = tonumber(payload) or 0
             local replyChannel = (channel == "WHISPER") and "WHISPER" or "GUILD"
             local replyTarget  = (channel == "WHISPER") and senderName or nil
             Print(senderName .. " requested sync — sending data.")
@@ -928,13 +1013,13 @@ frame:SetScript("OnEvent", function(self, event, ...)
             for i = 1, #me do seed = seed + string.byte(me, i) end
             local delay = 1 + ((seed + (time() % 1000)) % 30) / 10
             C_Timer.After(delay, function()
-                SendFullDatabase(replyChannel, replyTarget)
+                SendFullDatabase(replyChannel, replyTarget, sinceTS)
             end)
             return
         end
 
         -- Older request from a previous protocol version — ignore
-        if cmd == MSG_REQUEST or cmd == "REQ2" or cmd == "REQ3" or cmd == "REQ4" or cmd == "REQ5" then
+        if cmd == MSG_REQUEST or cmd == "REQ2" or cmd == "REQ3" or cmd == "REQ4" or cmd == "REQ5" or cmd == "REQ6" then
             Print("|cffff8800[AltTracker]|r Ignoring sync request from "..senderName.." (outdated addon version).")
             return
         end
@@ -959,7 +1044,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
         -- chunk under the v5 codec, so we tell the user to update both
         -- ends and move on.  Logged once per sender per session to
         -- avoid spamming the chat frame on multi-chunk streams.
-        if cmd == MSG_CHUNK or cmd == "CHUNK2" or cmd == "CHUNK3" then
+        if cmd == MSG_CHUNK or cmd == "CHUNK2" or cmd == "CHUNK3" or cmd == "CHUNK4" then
             local key = sender and sender:match("^([^%-]+)") or sender
             outdatedSenders = outdatedSenders or {}
             if not outdatedSenders[key] then
@@ -970,22 +1055,19 @@ frame:SetScript("OnEvent", function(self, event, ...)
             return
         end
 
-        -- v6 sequenced chunk: "CHUNK4|<sid>|<seq>/<total>|<base64-body>"
-        --
-        -- We strip the "<sid>|<seq>/<total>|" header off `payload`, then
-        -- base64-decode the rest to recover the raw chunk bytes.  The
-        -- decoded bytes are what the sender originally hashed, so
-        -- reassembly + checksum on the receiver hashes the same byte
-        -- stream.  Out-of-order and repeated arrivals within a stream are
-        -- handled (a repeat overwrites its slot; an out-of-order arrival
-        -- lands at its real index), and buffers are keyed per (sender,
-        -- sid) so two concurrent or retried streams never clobber.
+        -- v7 sequenced chunk: "CHUNK5|<sid>|<seq>/<total>|<encoded-bytes>"
+        -- The body is opaque compressed + addon-channel-encoded bytes; store it
+        -- as-is and concatenate on completion (then checksum + decode +
+        -- decompress). Out-of-order and repeated arrivals within a stream are
+        -- handled (a repeat overwrites its slot; an out-of-order arrival lands
+        -- at its real index); buffers are keyed per (sender, sid) so two
+        -- concurrent or retried streams never clobber.
         if cmd == MSG_CHUNK_V then
 
             local peer = sender or "?"
 
             if not payload then return end
-            local sidStr, seqStr, totalStr, encodedBody = payload:match("^(%d+)|(%d+)/(%d+)|(.*)$")
+            local sidStr, seqStr, totalStr, body = payload:match("^(%d+)|(%d+)/(%d+)|(.*)$")
             if not sidStr then
                 -- Malformed header — treat as drop, log and discard.
                 Print("|cffff8800[AltTracker]|r Malformed chunk from "..peer..", discarded.")
@@ -995,13 +1077,6 @@ frame:SetScript("OnEvent", function(self, event, ...)
             local total = tonumber(totalStr)
             if not seq or not total or seq < 1 or seq > total then
                 Print("|cffff8800[AltTracker]|r Out-of-range chunk seq from "..peer..", discarded.")
-                return
-            end
-
-            local chunkBody = Base64Decode(encodedBody or "")
-            if not chunkBody then
-                Print("|cffff8800[AltTracker]|r Base64 decode failed on chunk " ..
-                      seq .. "/" .. total .. " from " .. peer .. ", discarding.")
                 return
             end
 
@@ -1016,7 +1091,8 @@ frame:SetScript("OnEvent", function(self, event, ...)
             else
                 buf.lastTouched = time()
             end
-            buf.chunks[seq] = chunkBody
+            buf.chunks[seq] = body or ""
+            NoteSyncActivity(peer)   -- keep the sync-watch stall timer alive
 
             return
         end
@@ -1068,7 +1144,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
         end
 
         -- Old unversioned DONE from a previous addon version — discard buffer silently
-        if cmd == MSG_DONE or cmd == "DONE2" or cmd == "DONE3" or cmd == "DONE4" or cmd == "DONE5" then
+        if cmd == MSG_DONE or cmd == "DONE2" or cmd == "DONE3" or cmd == "DONE4" or cmd == "DONE5" or cmd == "DONE6" then
             local key = sender and sender:match("^([^%-]+)") or sender
             if incomingBuffers[key] then
                 incomingBuffers[key] = nil
@@ -1128,6 +1204,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
                 local pinged = BroadcastRequest()
                 if #pinged > 0 then
                     Print("Requesting data from: " .. table.concat(pinged, ", "))
+                    Print("|cff888888Data may lag while other addons finish loading — you'll get a line per peer as each completes.|r")
                 end
             end
 
@@ -1564,16 +1641,9 @@ SlashCmdList["ALTTRACKER"] = function(args)
         end
         Print("Sending your data to " .. target .. " and requesting theirs...")
         SendFullDatabase("WHISPER", target)
-        AltTrackerConfig = AltTrackerConfig or {}
-        local accountOnly = not AltTrackerConfig.sendAllAccounts
-        local nChunks = math.ceil(#SerializeFullDB(accountOnly) / MAX_CHUNK)
-        -- Mirror the pacing in ChunkAndSendPayload: first CHUNK_BURST_COUNT
-        -- chunks at burst rate, the rest at steady rate.  This is just an
-        -- estimate so the request goes out roughly when the data finishes.
-        local burst  = math.min(nChunks, CHUNK_BURST_COUNT)
-        local steady = math.max(nChunks - CHUNK_BURST_COUNT, 0)
-        local sendTime = (burst - 1) * CHUNK_BURST_INTERVAL + steady * CHUNK_STEADY_INTERVAL
-        C_Timer.After(sendTime + 1, function()
+        -- ChatThrottleLib paces the send in the background; fire the paired
+        -- request shortly after so both directions exchange.
+        C_Timer.After(3, function()
             RequestCharacters("WHISPER", target, true)
         end)
         return
@@ -1675,6 +1745,13 @@ AltTracker._test = {
     SerializeFullDB     = SerializeFullDB,
     DeserializeFullDB   = DeserializeFullDB,
     ChunkAndSendPayload = ChunkAndSendPayload,
+    RequestCharacters   = RequestCharacters,
+    GetPeerWatermark    = GetPeerWatermark,
+    WatchSyncPeer       = WatchSyncPeer,
+    CheckSyncWatch      = CheckSyncWatch,
+    NoteSyncActivity    = NoteSyncActivity,
+    ClearSyncWatch      = ClearSyncWatch,
+    PeerShort           = PeerShort,
     GetSyncTargets      = GetSyncTargets,
     CHAR_SEP            = CHAR_SEP,
     MAX_CHUNK           = MAX_CHUNK,

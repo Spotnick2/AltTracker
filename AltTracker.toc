@@ -5,6 +5,9 @@
 ## Version: 5.0
 ## SavedVariables: AltTrackerDB AltTrackerConfig
 
+Libs\LibStub\LibStub.lua
+Libs\LibDeflate\LibDeflate.lua
+Libs\ChatThrottleLib\ChatThrottleLib.lua
 Theme.lua
 AltTrackerRenderManifest.lua
 Core.lua

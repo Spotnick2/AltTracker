@@ -70,6 +70,14 @@ C_ChatInfo = {
     end,
 }
 
+-- ChatThrottleLib passthrough: the real CTL paces via an OnUpdate pump we don't
+-- drive here, so in tests it just forwards to the captured SendAddonMessage.
+ChatThrottleLib = {
+    SendAddonMessage = function(_, _prio, prefix, text, chattype, target)
+        return C_ChatInfo.SendAddonMessage(prefix, text, chattype, target)
+    end,
+}
+
 -- WoW's strsplit: each char of `delim` is a separator; `limit` caps the number
 -- of returned pieces (the last piece keeps the un-split remainder). Returns
 -- multiple values.
@@ -121,7 +129,9 @@ UnitRace  = function() return "Orc", "Orc" end
 UnitSex   = function() return 2 end
 UnitLevel = function() return 70 end
 GetRealmName = function() return "TestRealm" end
-time = function() return os.time() end
+-- Clock: real os.time() by default, but tests can pin it via WoW.now = <epoch>
+-- (and advance it) to drive time-dependent logic like the sync-watch deadline.
+time = function() return WoW.now or os.time() end
 
 ------------------------------------------------------------
 -- Test-control helpers
@@ -131,6 +141,7 @@ function WoW.reset()
     WoW.loaded, WoW.loadCalls, WoW.timers, WoW.chat, WoW.sent, WoW.loggedIn =
         {}, {}, {}, {}, {}, true
     WoW.sendResult = true
+    WoW.now = nil   -- unpin the clock (fall back to os.time())
 end
 
 -- All captured wire messages (the `message` field of each SendAddonMessage).
