@@ -79,6 +79,10 @@ local streamCounter = 0
 local CHUNK_BURST_COUNT    = 8     -- packets allowed before we slow down
 local CHUNK_BURST_INTERVAL = 0.1   -- seconds between burst packets
 local CHUNK_STEADY_INTERVAL = 1.05 -- seconds between sustained packets
+-- When a DONE arrives but the buffer isn't complete, wait this long for
+-- late/reordered chunks before declaring the stream incomplete. Prevents a
+-- DONE that overtook an in-flight chunk from triggering a needless resync.
+local CHUNK_DONE_GRACE      = 2     -- seconds
 
 -- incomingBuffers[senderShort] = {
 --   chunks = { [seq] = chunkBody, ... },   -- sparse; receiver fills as packets arrive
@@ -334,16 +338,24 @@ end
 -- Deserialize full DB
 ------------------------------------------------------------
 
--- Wipe all per-profession flat fields from a record before merging incoming
--- data.  Without this, a character who drops a profession (e.g. Mining) would
--- retain the stale prof_Mining field from the previously stored record because
+-- Wipe the per-slot gear and per-profession "current state" fields from a
+-- record before merging incoming data. Without this, a slot the source
+-- unequipped or a profession it dropped would retain its stale field, because
 -- the merge only writes keys that ARE present in the new data.
-local function ClearProfessionFields(t)
+--
+-- Deliberately preserves:
+--   * gearlink_* — local-only (never synced), so we must not drop it here.
+--   * everything else (account, guild, money, name, class, …) — metadata the
+--     incoming record overwrites when present and should otherwise keep, so a
+--     peer that hasn't tagged a character doesn't wipe our account assignment.
+local function ClearSyncedStateFields(t)
     t.prof1 = nil; t.prof2 = nil
     t.prof1Skill = nil; t.prof2Skill = nil
     t.prof1Max   = nil; t.prof2Max   = nil
     for k in pairs(t) do
-        if k:sub(1, 5) == "prof_" or k:sub(1, 8) == "profmax_" then
+        if k:find("^prof_") or k:find("^profmax_")
+        or k:find("^gear_") or k:find("^gearq_")
+        or k:find("^gearname_") or k:find("^gearid_") then
             t[k] = nil
         end
     end
@@ -380,7 +392,7 @@ local function DeserializeFullDB(payload, sender)
                     -- sent with incomplete gear (GetItemInfo cache miss) and a
                     -- corrected version arrives shortly after with the same stamp.
                     if existingTime - incomingTime <= 60 then
-                        ClearProfessionFields(existing)
+                        ClearSyncedStateFields(existing)
                         for k,v in pairs(c) do
                             existing[k] = v
                         end
@@ -744,7 +756,7 @@ local function ReceiveCharacter(c, sender)
 
     local existing = AltTrackerDB[c.guid] or {}
 
-    ClearProfessionFields(existing)
+    ClearSyncedStateFields(existing)
     for k,v in pairs(c) do
         existing[k] = v
     end
@@ -780,6 +792,81 @@ local function RequestResync(peer, reason)
               " after 2 auto-retries. Try /alts sync " .. peer .. " manually.")
         autoRetryCounts[peer] = nil
     end
+end
+
+------------------------------------------------------------
+-- Finalize a received stream: verify completeness + checksum, then merge.
+-- Called either immediately (buffer already complete on DONE) or after the
+-- grace window (DONE arrived before a late/reordered chunk). Reads the
+-- DONE's checksum stashed on the buffer as `buf.checksum`.
+------------------------------------------------------------
+
+local function CompleteStream(peer, bkey)
+    local buf = incomingBuffers[bkey]
+    if not buf or not buf.total or buf.total <= 0 then return end
+
+    -- Completeness
+    local missing = {}
+    for i = 1, buf.total do
+        if buf.chunks[i] == nil then missing[#missing + 1] = i end
+    end
+    if #missing > 0 then
+        local detail
+        if #missing <= 8 then
+            detail = table.concat(missing, ",")
+        else
+            local head = {}
+            for i = 1, 8 do head[i] = missing[i] end
+            detail = table.concat(head, ",") .. ",… (+" .. (#missing - 8) .. " more)"
+        end
+        incomingBuffers[bkey] = nil
+        RequestResync(peer, #missing .. "/" .. buf.total .. " chunks missing (" .. detail .. ").")
+        return
+    end
+
+    -- Reassemble in order + checksum
+    local ordered = {}
+    for i = 1, buf.total do ordered[i] = buf.chunks[i] end
+    local buffer = table.concat(ordered)
+
+    local remoteChecksum = buf.checksum
+    if remoteChecksum and remoteChecksum ~= "" then
+        local localChecksum = ComputeChecksum(buffer)
+        if localChecksum ~= remoteChecksum then
+            Print("|cffff0000Checksum mismatch|r from " .. peer ..
+                  " (expected " .. remoteChecksum .. ", got " .. localChecksum .. ").")
+            incomingBuffers[bkey] = nil
+            RequestResync(peer, "checksum mismatch.")
+            return
+        end
+    end
+
+    -- Dispatch
+    if buffer:sub(1, 5) == MSG_CHAR .. "\n" then
+        local charPayload = buffer:sub(6)
+        local c = DeserializeChar(charPayload)
+        if c then
+            Print(peer .. " sent character data for " .. (c.name or "unknown") .. ".")
+            ReceiveCharacter(c, peer)
+        end
+    else
+        Print("Receiving data from " .. peer .. "...")
+        local before = 0
+        for _ in pairs(AltTrackerDB) do before = before + 1 end
+        DeserializeFullDB(buffer, peer)
+        local after = 0
+        for _ in pairs(AltTrackerDB) do after = after + 1 end
+        local newChars = after - before
+        if newChars > 0 then
+            Print("Sync with " .. peer .. " complete. " .. after .. " characters known (" .. newChars .. " new).")
+        else
+            Print("Sync with " .. peer .. " complete. " .. after .. " characters known.")
+        end
+    end
+
+    -- Success — clear retry budget and buffer for this stream.
+    if autoRetryCounts then autoRetryCounts[peer] = nil end
+    incomingBuffers[bkey] = nil
 end
 
 ------------------------------------------------------------
@@ -952,85 +1039,35 @@ frame:SetScript("OnEvent", function(self, event, ...)
             local bkey = peer .. "#" .. sidStr
             local buf = incomingBuffers[bkey]
 
-            if buf and buf.total and buf.total > 0 then
+            if not buf then
+                -- No chunks buffered for this stream (never arrived, or it was
+                -- already finalized). Clear any leftover retry budget.
+                if autoRetryCounts then autoRetryCounts[peer] = nil end
+                return
+            end
 
-                -- Check completeness first
-                local missing = {}
+            -- Stash the checksum so a deferred completion can still verify it.
+            buf.checksum = remoteChecksum
+
+            -- Complete right now?
+            local complete = buf.total and buf.total > 0
+            if complete then
                 for i = 1, buf.total do
-                    if buf.chunks[i] == nil then
-                        missing[#missing + 1] = i
-                    end
-                end
-
-                if #missing > 0 then
-                    -- Truncate the missing-chunk list in the printed
-                    -- message so a 200-chunk stream with 50 drops doesn't
-                    -- flood the chat frame.
-                    local detail
-                    if #missing <= 8 then
-                        detail = table.concat(missing, ",")
-                    else
-                        local head = {}
-                        for i = 1, 8 do head[i] = missing[i] end
-                        detail = table.concat(head, ",") .. ",… (+" .. (#missing - 8) .. " more)"
-                    end
-                    incomingBuffers[bkey] = nil
-                    RequestResync(peer, #missing .. "/" .. buf.total ..
-                        " chunks missing (" .. detail .. ").")
-                    return
-                end
-
-                -- All present; reassemble in order.
-                local ordered = {}
-                for i = 1, buf.total do
-                    ordered[i] = buf.chunks[i]
-                end
-                local buffer = table.concat(ordered)
-
-                if remoteChecksum and remoteChecksum ~= "" then
-                    local localChecksum = ComputeChecksum(buffer)
-                    if localChecksum ~= remoteChecksum then
-                        Print("|cffff0000Checksum mismatch|r from " .. peer ..
-                              " (expected " .. remoteChecksum ..
-                              ", got " .. localChecksum .. ").")
-                        incomingBuffers[bkey] = nil
-                        -- Same recovery as a dropped chunk: don't leave the DB
-                        -- stale, ask for a fresh stream (bounded).
-                        RequestResync(peer, "checksum mismatch.")
-                        return
-                    end
-                end
-
-                if buffer:sub(1, 5) == MSG_CHAR .. "\n" then
-                    local charPayload = buffer:sub(6)
-                    local c = DeserializeChar(charPayload)
-                    if c then
-                        Print(peer .. " sent character data for " .. (c.name or "unknown") .. ".")
-                        ReceiveCharacter(c, peer)
-                    end
-                else
-                    Print("Receiving data from " .. peer .. "...")
-
-                    local before = 0
-                    for _ in pairs(AltTrackerDB) do before = before + 1 end
-
-                    DeserializeFullDB(buffer, peer)
-
-                    local after = 0
-                    for _ in pairs(AltTrackerDB) do after = after + 1 end
-
-                    local newChars = after - before
-                    if newChars > 0 then
-                        Print("Sync with " .. peer .. " complete. " .. after .. " characters known (" .. newChars .. " new).")
-                    else
-                        Print("Sync with " .. peer .. " complete. " .. after .. " characters known.")
-                    end
+                    if buf.chunks[i] == nil then complete = false; break end
                 end
             end
 
-            -- Successful (or empty) DONE — clear retry budget for this peer
-            if autoRetryCounts then autoRetryCounts[peer] = nil end
-            incomingBuffers[bkey] = nil
+            if complete then
+                CompleteStream(peer, bkey)
+            elseif not buf.donePending then
+                -- A DONE can overtake an in-flight / reordered chunk. Give the
+                -- straggler a short grace window before finalizing, so we don't
+                -- declare a false "missing" and trigger a needless resync.
+                buf.donePending = true
+                C_Timer.After(CHUNK_DONE_GRACE, function()
+                    CompleteStream(peer, bkey)
+                end)
+            end
             return
         end
 
@@ -1143,19 +1180,23 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
         AltTrackerConfig = AltTrackerConfig or {}
         local whitelist = AltTrackerConfig.whitelist or {}
-        local inWhitelist = false
+        -- The system message only carries the realm-less name, but whitelist
+        -- entries may be "Name-Realm". Match on the realm-less part, and
+        -- whisper the FULL whitelist entry so cross-realm routing works.
+        local matched = nil
         for _, w in ipairs(whitelist) do
-            if w == peerName then inWhitelist = true; break end
+            local wShort = w:match("^([^%-]+)") or w
+            if w == peerName or wShort == peerName then matched = w; break end
         end
-        if not inWhitelist then return end
+        if not matched then return end
 
         -- Slight delay so the peer's CHAT_MSG_ADDON handler is fully
         -- primed before we fire — same reasoning as the 2s delay at
         -- PLAYER_LOGIN.
         C_Timer.After(3, function()
-            local sent = RequestCharacters("WHISPER", peerName)
+            local sent = RequestCharacters("WHISPER", matched)
             if sent then
-                Print(peerName .. " came online — requesting data.")
+                Print(matched .. " came online — requesting data.")
             end
         end)
         return

@@ -226,14 +226,17 @@ WoW.chat = {}
 WoW.sent = {}
 for i = 1, #dChunks - 1 do receive(dChunks[i], "Drop-Realm") end  -- drop the last chunk
 receive(dDone, "Drop-Realm")
-check(chatHas("missing") or chatHas("incomplete"), "a missing chunk is detected and reported")
-eq(dbCount(), 0, "DB is not updated when a chunk is missing")
+-- DONE defers behind the grace window; nothing is declared missing yet.
+eq(dbCount(), 0, "incomplete stream is not applied")
+WoW.flushTimers()  -- grace window elapses -> completion check finds it still missing
+check(chatHas("missing") or chatHas("incomplete"), "a genuinely missing chunk is detected after the grace window")
+eq(dbCount(), 0, "DB is not updated when a chunk stays missing")
 WoW.flushTimers()  -- run the queued resync request
 local reqSent = false
 for _, m in ipairs(WoW.sentMessages()) do
     if m == T.MSG_REQUEST_V then reqSent = true end
 end
-check(reqSent, "receiver auto-requests a resync after a drop")
+check(reqSent, "receiver auto-requests a resync after a genuine drop")
 
 ------------------------------------------------------------
 -- 10. Checksum mismatch discards the data AND auto-requests a resync (H2)
@@ -424,6 +427,68 @@ for i = 1, 3 do
 end
 check(bothOk, "both interleaved streams reassembled independently")
 eq(dbCount(), 6, "all 6 chars from two interleaved streams stored")
+
+------------------------------------------------------------
+-- 21. DONE overtaking a late chunk completes within the grace window (M1)
+------------------------------------------------------------
+
+WoW.reset()
+seedDB("Player-Late-", 6)
+T.ChunkAndSendPayload(T.SerializeFullDB(false), "WHISPER", "Late")
+WoW.flushTimers()
+local lChunks, lDone = splitWire(WoW.sentMessages())
+check(#lChunks >= 2, "need multiple chunks for the late-chunk scenario")
+
+AltTrackerDB = {}
+WoW.chat = {}
+-- Deliver all but the last chunk, then let the DONE overtake the straggler.
+for i = 1, #lChunks - 1 do receive(lChunks[i], "Late-Realm") end
+receive(lDone, "Late-Realm")
+eq(dbCount(), 0, "DONE does not finalize while a chunk is still in flight")
+check(not chatHas("missing"), "DONE does not immediately declare a missing chunk (grace)")
+-- The straggler arrives during the grace window; then the grace timer fires.
+receive(lChunks[#lChunks], "Late-Realm")
+WoW.flushTimers()
+check(not chatHas("missing"), "a late chunk arriving within grace avoids a false 'missing'")
+eq(dbCount(), 6, "the stream completes once the late chunk arrives within grace")
+
+------------------------------------------------------------
+-- 22. Peer-online re-request matches a realm-qualified whitelist entry (M3)
+------------------------------------------------------------
+
+WoW.reset()
+AltTrackerConfig = { whitelist = { "Bob-Realm" } }
+AltTrackerDB = {}
+onEvent(T.frame, "CHAT_MSG_SYSTEM", "Bob has come online. |Hplayer:Bob|h[Bob]|h")
+WoW.flushTimers()   -- fire the delayed re-request
+local reqTarget = nil
+for _, s in ipairs(WoW.sent) do
+    if s.message == T.MSG_REQUEST_V then reqTarget = s.target end
+end
+eq(reqTarget, "Bob-Realm", "peer-online whispers the REQ to the full Name-Realm whitelist entry")
+
+------------------------------------------------------------
+-- 23. Merge drops stale per-slot gear fields; keeps local-only + metadata (M6)
+------------------------------------------------------------
+
+WoW.reset()
+AltTrackerDB = { ["Player-Stale-1"] = {
+    guid = "Player-Stale-1", name = "Stale", class = "WARRIOR", level = 70,
+    gearid_head = 111, gearname_head = "Old Helm", gearq_head = 4,
+    gearlink_head = "|Hitem:111|h",  -- local-only, must survive the merge
+    account = 2,                     -- metadata, must survive when peer omits it
+    lastUpdate = 1000,
+} }
+-- Incoming record has unequipped the head slot and is untagged (no account).
+T.DeserializeFullDB(T.SerializeChar(
+    { guid = "Player-Stale-1", name = "Stale", class = "WARRIOR", level = 70, lastUpdate = 1000 }
+) .. "\n" .. T.CHAR_SEP, "Peer")
+local rec = AltTrackerDB["Player-Stale-1"]
+eq(rec.gearid_head,   nil, "stale gearid_ for an unequipped slot is cleared")
+eq(rec.gearname_head, nil, "stale gearname_ is cleared")
+eq(rec.gearq_head,    nil, "stale gearq_ is cleared")
+eq(rec.gearlink_head, "|Hitem:111|h", "local-only gearlink_ is preserved across merge")
+eq(rec.account,       2,   "metadata (account) is preserved when the incoming record omits it")
 
 ------------------------------------------------------------
 -- Summary
