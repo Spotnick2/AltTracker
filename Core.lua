@@ -327,6 +327,21 @@ end
 -- Deserialize full DB
 ------------------------------------------------------------
 
+-- Wipe all per-profession flat fields from a record before merging incoming
+-- data.  Without this, a character who drops a profession (e.g. Mining) would
+-- retain the stale prof_Mining field from the previously stored record because
+-- the merge only writes keys that ARE present in the new data.
+local function ClearProfessionFields(t)
+    t.prof1 = nil; t.prof2 = nil
+    t.prof1Skill = nil; t.prof2Skill = nil
+    t.prof1Max   = nil; t.prof2Max   = nil
+    for k in pairs(t) do
+        if k:sub(1, 5) == "prof_" or k:sub(1, 8) == "profmax_" then
+            t[k] = nil
+        end
+    end
+end
+
 local function DeserializeFullDB(payload, sender)
 
     local current = {}
@@ -358,6 +373,7 @@ local function DeserializeFullDB(payload, sender)
                     -- sent with incomplete gear (GetItemInfo cache miss) and a
                     -- corrected version arrives shortly after with the same stamp.
                     if existingTime - incomingTime <= 60 then
+                        ClearProfessionFields(existing)
                         for k,v in pairs(c) do
                             existing[k] = v
                         end
@@ -716,6 +732,7 @@ local function ReceiveCharacter(c, sender)
 
     local existing = AltTrackerDB[c.guid] or {}
 
+    ClearProfessionFields(existing)
     for k,v in pairs(c) do
         existing[k] = v
     end
@@ -779,6 +796,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
         if cmd == MSG_REQUEST_V then
             local replyChannel = (channel == "WHISPER") and "WHISPER" or "GUILD"
             local replyTarget  = (channel == "WHISPER") and senderName or nil
+            Print(senderName .. " requested sync — sending data.")
             -- Stagger replies with entropy from the receiver's name +
             -- current time, so that two clients on the same machine
             -- replying to a broadcast don't pick the same delay (math.random

@@ -151,13 +151,13 @@ end
 
 ------------------------------------------------------------
 -- BiS lookup
--- Returns the tier name(s) for which an item is BiS, or nil.
+-- Returns CURRENT_TIER if the item is BiS for the active tier, else nil.
+-- Only the current phase's BiS list counts: previous-tier gear is no
+-- longer marked, and the BiS column ratio reflects current-tier progress.
 ------------------------------------------------------------
 
-------------------------------------------------------------
--- BiS lookup
--- Returns the tier name(s) for which an item is BiS, or nil.
-------------------------------------------------------------
+-- *** TUNE THIS VALUE EACH PHASE ***
+local CURRENT_TIER = "T5"
 
 local function IsItemBis(class, spec, slotKey, itemName)
     if not itemName or itemName == "" then return nil end
@@ -172,31 +172,33 @@ local function IsItemBis(class, spec, slotKey, itemName)
     local specData = classData[spec]
     if not specData then return nil end
 
-    -- Check each tier for this spec
-    local matchedTiers = {}
-    local TIER_ORDER = {"T4", "T5", "T6", "Sunwell"}
-    for _, tier in ipairs(TIER_ORDER) do
-        local tierData = specData[tier]
-        if tierData and tierData[slotKey] then
-            local items = tierData[slotKey]
-            if type(items) == "string" then
-                if items == itemName then
-                    table.insert(matchedTiers, tier)
-                end
-            elseif type(items) == "table" then
-                for _, bisName in ipairs(items) do
-                    if bisName == itemName then
-                        table.insert(matchedTiers, tier)
-                        break
-                    end
-                end
-            end
+    local tierData = specData[CURRENT_TIER]
+    if not tierData or not tierData[slotKey] then return nil end
+
+    local items = tierData[slotKey]
+    if type(items) == "string" then
+        if items == itemName then return CURRENT_TIER end
+    elseif type(items) == "table" then
+        for _, bisName in ipairs(items) do
+            if bisName == itemName then return CURRENT_TIER end
         end
     end
+    return nil
+end
 
-    if #matchedTiers > 0 then
-        return table.concat(matchedTiers, ", ")
-    end
+-- Returns the primary BiS item name for a slot (the first entry when a table
+-- of alternatives is listed), used to render the side-by-side comparison
+-- tooltip in the Gear Progression grid.
+local function GetBisItemName(class, spec, slotKey)
+    if not class or not spec or not slotKey then return nil end
+    local bisData = AltTracker.BisData
+    if not bisData then return nil end
+    local classData = bisData[class]; if not classData then return nil end
+    local specData = classData[spec]; if not specData then return nil end
+    local tierData = specData[CURRENT_TIER]; if not tierData then return nil end
+    local items = tierData[slotKey]
+    if type(items) == "string" then return items
+    elseif type(items) == "table" then return items[1] end
     return nil
 end
 
@@ -222,32 +224,8 @@ local function CountBisForSpec(char, specOverride)
     local count = 0
     for _, slotKey in ipairs(ALL_GEAR_KEYS) do
         local itemName = char["gearname_"..slotKey] or ""
-        -- Temporarily use specOverride instead of char.spec
-        local bisData = AltTracker.BisData
-        if bisData then
-            local classData = bisData[char.class]
-            if classData then
-                local specData = classData[specOverride]
-                if specData then
-                    local matched = false
-                    local TIER_ORDER = {"T4","T5","T6","Sunwell"}
-                    for _, tier in ipairs(TIER_ORDER) do
-                        local tierData = specData[tier]
-                        if tierData and tierData[slotKey] and itemName ~= "" then
-                            local items = tierData[slotKey]
-                            if type(items) == "string" then
-                                if items == itemName then matched = true; break end
-                            elseif type(items) == "table" then
-                                for _, bisName in ipairs(items) do
-                                    if bisName == itemName then matched = true; break end
-                                end
-                            end
-                        end
-                        if matched then break end
-                    end
-                    if matched then count = count + 1 end
-                end
-            end
+        if IsItemBis(char.class, specOverride, slotKey, itemName) then
+            count = count + 1
         end
     end
     -- 2H bonus
@@ -402,7 +380,7 @@ end
 -- *** TUNE THIS VALUE EACH PHASE ***
 -- Set to the highest epic ilvl available in the current tier.
 -- T4 = 125, T5 = 141, T6 = 154, Sunwell = 164
-local ILVL_CEILING = 164
+local ILVL_CEILING = 141
 
 -- Fixed breakpoints for the quality colour ramp
 local ILVL_POOR     = 60   -- below: grey
@@ -426,7 +404,7 @@ local function IlvlToColor(ilvl)
     local WHITE      = { r=1.00, g=1.00, b=1.00 }
     local GREEN      = { r=0.12, g=1.00, b=0.00 }
     local BLUE       = { r=0.00, g=0.44, b=0.87 }
-    -- Purple sub-gradient: muted at T4, rich/vivid at ceiling
+    -- Purple sub-gradient: muted at T4 entry, rich/vivid at ceiling (current tier max)
     local PURPLE_LOW  = { r=0.47, g=0.20, b=0.73 }  -- #7833BA muted blue-purple
     local PURPLE_HIGH = { r=0.78, g=0.30, b=1.00 }  -- #C74DFF vivid rich purple
 
@@ -459,9 +437,9 @@ local function FormatLastOnline(ts, isCurrentPlayer)
     if isCurrentPlayer and diff<300 then return "|cff00ff00Online|r" end
     if     diff<3600     then return "|cff88ff88"..math.floor(diff/60).."m ago|r"
     elseif diff<86400    then return "|cffffff88"..math.floor(diff/3600).."h ago|r"
-    elseif diff<86400*7  then return "|cffaaaaaa"..math.floor(diff/86400).." days|r"
-    elseif diff<86400*30 then return "|cff888888"..math.floor(diff/(86400*7)).." weeks|r"
-    else                      return "|cff666666"..math.floor(diff/86400).." days|r"
+    elseif diff<86400*7  then local d=math.floor(diff/86400);      return "|cffaaaaaa"..d..(d==1 and " day"  or " days") .."|r"
+    elseif diff<86400*30 then local w=math.floor(diff/(86400*7));  return "|cff888888"..w..(w==1 and " week" or " weeks").."|r"
+    else                      local d=math.floor(diff/86400);      return "|cff666666"..d..(d==1 and " day"  or " days") .."|r"
     end
 end
 
@@ -523,7 +501,7 @@ local function GetGroupBG() return unpack(AltTracker.C.BG_GROUP) end
 -- Scrollable row  (receives only the non-frozen columns)
 ------------------------------------------------------------
 
-local DIVIDER_COLOR = {0.25, 0.25, 0.32, 0.9}
+local DIVIDER_COLOR = AltTracker.C.GRIDLINE
 
 function AltTracker.CreateRow(parent, height, columns)
     local row = CreateFrame("Frame", nil, parent)
@@ -628,7 +606,17 @@ function AltTracker.CreateRow(parent, height, columns)
 
             tip:SetScript("OnEnter", function()
                 hoverBg:Show()
-                if tip.itemLink and tip.itemLink ~= "" then
+                if tip.isCurrentPlayer and tip.slotID then
+                    -- Live tooltip for the currently logged-in character's equipped item.
+                    -- SetInventoryItem shows enchants, gems, and socket bonuses correctly.
+                    GameTooltip:SetOwner(tip, "ANCHOR_RIGHT")
+                    GameTooltip:SetInventoryItem("player", tip.slotID)
+                    if tip.bisTier then
+                        GameTooltip:AddLine(" ")
+                        GameTooltip:AddLine("|cff00ff00★ BiS: "..tip.bisTier.."|r", 0, 1, 0)
+                    end
+                    GameTooltip:Show()
+                elseif tip.itemLink and tip.itemLink ~= "" then
                     -- Extract item ID for safe tooltip display
                     local itemID = tip.itemLink:match("item:(%d+)")
                     if itemID then
@@ -656,17 +644,40 @@ function AltTracker.CreateRow(parent, height, columns)
                     end
                     GameTooltip:Show()
                 end
+
+                -- Side-by-side BiS comparison: if the equipped item is not BiS
+                -- for the current tier, show the BiS item's tooltip next to the
+                -- equipped one. GetItemInfo only returns a link if the client
+                -- has already cached the item — uncached items fall back to a
+                -- plain name line on GameTooltip.
+                if tip.bisName and (not tip.bisTier) and GameTooltip:IsShown() then
+                    local _, bisLink = GetItemInfo(tip.bisName)
+                    if bisLink then
+                        local st = ShoppingTooltip1
+                        st:SetOwner(GameTooltip, "ANCHOR_NONE")
+                        st:ClearAllPoints()
+                        st:SetPoint("TOPLEFT", GameTooltip, "TOPRIGHT", 2, 0)
+                        st:SetHyperlink(bisLink)
+                        st:Show()
+                    else
+                        GameTooltip:AddLine(" ")
+                        GameTooltip:AddLine("|cffaaaaaaBiS: |r|cffffffff"..tip.bisName.."|r", 1, 1, 1)
+                        GameTooltip:AddLine("|cff666666(hover the item in-game to cache its tooltip)|r", 0.5, 0.5, 0.5)
+                        GameTooltip:Show()
+                    end
+                end
             end)
             tip:SetScript("OnLeave", function()
                 hoverBg:Hide()
                 GameTooltip:Hide()
+                if ShoppingTooltip1 then ShoppingTooltip1:Hide() end
             end)
             row.gearTips[i] = tip
         end
 
         if i<#columns then
             local div = row:CreateTexture(nil,"ARTWORK")
-            div:SetSize(1,height-4)
+            div:SetSize(1,height)
             div:SetPoint("LEFT",x+col.width+math.floor(padding/2),0)
             div:SetColorTexture(unpack(DIVIDER_COLOR))
             row.dividers = row.dividers or {}
@@ -798,12 +809,16 @@ function AltTracker.RenderRow(row, char, index, columns)
 
             -- BiS check
             local bisTier = IsItemBis(char.class, char.spec, slotKey, itemName)
+            local bisName = bisTier and nil or GetBisItemName(char.class, char.spec, slotKey)
             if row.gearTips[i] then
-                row.gearTips[i].slotIlvl    = v
-                row.gearTips[i].slotQuality  = q
-                row.gearTips[i].itemName     = itemName
-                row.gearTips[i].itemLink     = itemLink
-                row.gearTips[i].bisTier      = bisTier
+                row.gearTips[i].slotIlvl         = v
+                row.gearTips[i].slotQuality       = q
+                row.gearTips[i].itemName          = itemName
+                row.gearTips[i].itemLink          = itemLink
+                row.gearTips[i].bisTier           = bisTier
+                row.gearTips[i].bisName           = bisName
+                row.gearTips[i].slotID            = col.slotID
+                row.gearTips[i].isCurrentPlayer   = (char.guid == UnitGUID("player"))
             end
             -- Prepend a green checkmark for BiS items
             if bisTier then

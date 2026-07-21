@@ -41,7 +41,8 @@ AltTracker.C = {
 
     -- Borders and separators
     BORDER       = { 0, 0, 0, 1 },              -- pure black (ElvUI default)
-    SEP          = { 0.22, 0.22, 0.22, 1 },     -- neutral mid-tone separator
+    SEP          = { 0.22, 0.22, 0.22, 1 },     -- neutral mid-tone separator (structural borders)
+    GRIDLINE     = { 0.5, 0.5, 0.5, 0.12 },     -- faint neutral vertical column gridline (spreadsheet feel)
 
     -- Text hierarchy
     TEXT_DIM     = { 0.50, 0.50, 0.50 },        -- secondary, inactive

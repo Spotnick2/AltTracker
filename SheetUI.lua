@@ -1349,7 +1349,7 @@ local function BuildHeaders()
         if i<#scrollableCols then
             local div=headerContent:CreateTexture(nil,"OVERLAY")
             div:SetSize(1,currentHeaderHeight); div:SetPoint("LEFT",x+col.width+math.floor(padding/2),0)
-            div:SetColorTexture(unpack(AltTracker.C.SEP))
+            div:SetColorTexture(unpack(AltTracker.C.GRIDLINE))
             table.insert(headerDividers, div)
         end
         x=x+col.width+padding
