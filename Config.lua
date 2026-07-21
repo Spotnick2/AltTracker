@@ -42,6 +42,11 @@ local function EnsureDefaults()
     if not AltTrackerConfig.plugins then
         AltTrackerConfig.plugins = { professions = true, roster = true }
     end
+    -- Delta-sync watermarks: newest lastUpdate value received from each peer,
+    -- so a sync request pulls only what changed since. Keyed by short name.
+    if not AltTrackerConfig.peerWatermarks then
+        AltTrackerConfig.peerWatermarks = {}
+    end
     -- Appearance defaults
     AltTrackerConfig.theme = AltTrackerConfig.theme or "dark"
     if AltTrackerConfig.scale == nil then

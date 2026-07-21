@@ -74,6 +74,12 @@ local function sidOf(chunkMessage)
     return chunkMessage:match("^" .. T.MSG_CHUNK_V .. "|(%d+)|")
 end
 
+-- A REQ is now "REQ<ver>|<watermark>" (bare "REQ<ver>" also accepted).
+local function isReq(m)
+    return m == T.MSG_REQUEST_V
+        or m:sub(1, #T.MSG_REQUEST_V + 1) == T.MSG_REQUEST_V .. "|"
+end
+
 -- Populate AltTrackerDB with n fresh characters using a unique guid prefix.
 local function seedDB(prefix, n)
     AltTrackerDB = {}
@@ -234,7 +240,7 @@ eq(dbCount(), 0, "DB is not updated when a chunk stays missing")
 WoW.flushTimers()  -- run the queued resync request
 local reqSent = false
 for _, m in ipairs(WoW.sentMessages()) do
-    if m == T.MSG_REQUEST_V then reqSent = true end
+    if isReq(m) then reqSent = true end
 end
 check(reqSent, "receiver auto-requests a resync after a genuine drop")
 
@@ -259,7 +265,7 @@ eq(dbCount(), 0, "data is discarded on checksum mismatch")
 WoW.flushTimers()   -- run the queued resync request
 local cReq = false
 for _, m in ipairs(WoW.sentMessages()) do
-    if m == T.MSG_REQUEST_V then cReq = true end
+    if isReq(m) then cReq = true end
 end
 check(cReq, "checksum mismatch now auto-requests a resync (H2 fix)")
 
@@ -463,7 +469,7 @@ onEvent(T.frame, "CHAT_MSG_SYSTEM", "Bob has come online. |Hplayer:Bob|h[Bob]|h"
 WoW.flushTimers()   -- fire the delayed re-request
 local reqTarget = nil
 for _, s in ipairs(WoW.sent) do
-    if s.message == T.MSG_REQUEST_V then reqTarget = s.target end
+    if isReq(s.message) then reqTarget = s.target end
 end
 eq(reqTarget, "Bob-Realm", "peer-online whispers the REQ to the full Name-Realm whitelist entry")
 
@@ -510,6 +516,54 @@ receive("CHAR|" .. T.SerializeChar(
     { guid = "Player-CH-1", name = "Cee", class = "MAGE", ilvl = 260, lastUpdate = 1000 }
 ), "Peer-Realm")
 eq(AltTrackerDB["Player-CH-1"].ilvl, 260, "current single-char update is applied")
+
+------------------------------------------------------------
+-- 25. Delta sync: SerializeFullDB(sinceTS) only sends changed characters
+------------------------------------------------------------
+
+WoW.reset()
+AltTrackerConfig = { peerWatermarks = {} }
+AltTrackerDB = {
+    ["Player-DS-old"] = { guid = "Player-DS-old", name = "Old", class = "MAGE",  ilvl = 100, lastUpdate = 500 },
+    ["Player-DS-new"] = { guid = "Player-DS-new", name = "New", class = "ROGUE", ilvl = 110, lastUpdate = 900 },
+}
+local full = T.SerializeFullDB(false, 0)
+check(full:find("Player-DS-old", 1, true) and full:find("Player-DS-new", 1, true), "full sync (sinceTS 0) includes every character")
+local delta = T.SerializeFullDB(false, 600)
+check(not delta:find("Player-DS-old", 1, true), "delta excludes a character not changed since the watermark")
+check(delta:find("Player-DS-new", 1, true), "delta includes a character changed since the watermark")
+
+------------------------------------------------------------
+-- 26. Delta sync: the watermark advances after a successful receive
+------------------------------------------------------------
+
+WoW.reset()
+AltTrackerConfig = { peerWatermarks = {} }
+AltTrackerDB = {
+    ["Player-WM-1"] = { guid = "Player-WM-1", name = "W1", class = "MAGE",  ilvl = 100, lastUpdate = 700 },
+    ["Player-WM-2"] = { guid = "Player-WM-2", name = "W2", class = "ROGUE", ilvl = 110, lastUpdate = 1200 },
+}
+T.ChunkAndSendPayload(T.SerializeFullDB(false, 0), "WHISPER", "x")
+WoW.flushTimers()
+local wmWire = WoW.sentMessages()
+AltTrackerDB = {}
+for _, m in ipairs(wmWire) do receive(m, "Wmpeer-Realm") end
+eq(AltTrackerConfig.peerWatermarks["Wmpeer"], 1200, "watermark advances to the newest received lastUpdate")
+
+------------------------------------------------------------
+-- 27. Delta sync: a REQ carries our watermark for that peer
+------------------------------------------------------------
+
+WoW.reset()
+AltTrackerConfig = { peerWatermarks = { Zephyr = 4242 } }
+WoW.sent = {}
+T.RequestCharacters("WHISPER", "Zephyr-Realm", true)
+local reqMsg = nil
+for _, sdata in ipairs(WoW.sent) do
+    if isReq(sdata.message) then reqMsg = sdata.message end
+end
+eq(reqMsg, T.MSG_REQUEST_V .. "|4242", "REQ carries our delta watermark for the peer")
+eq(T.GetPeerWatermark("Zephyr-Realm"), 4242, "GetPeerWatermark resolves by realm-less short name")
 
 ------------------------------------------------------------
 -- Summary

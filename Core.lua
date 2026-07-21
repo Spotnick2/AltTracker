@@ -25,6 +25,10 @@ local function CleanupDB()
         AltTracker.ScanCharacter()
     end
 
+    -- We just wiped the DB, so forget every peer's delta watermark — the next
+    -- request must pull a FULL database again, not just deltas.
+    if AltTracker.ResetPeerWatermarks then AltTracker.ResetPeerWatermarks() end
+
     return kept
 end
 
@@ -308,9 +312,35 @@ end
 -- intact — never split across two packets.
 local CHAR_SEP = "==END=="
 
-local function SerializeFullDB(accountOnly)
+-- Per-peer delta-sync watermark: the newest lastUpdate VALUE we have received
+-- from that peer. It is the peer's OWN timestamp, so we never compare across
+-- machine clocks. Persisted in AltTrackerConfig.peerWatermarks, keyed by the
+-- realm-less short name so a REQ target and its reply sender map to one entry.
+local function PeerShort(name)
+    return (name and name:match("^([^%-]+)")) or name
+end
+local function GetPeerWatermark(name)
+    AltTrackerConfig = AltTrackerConfig or {}
+    AltTrackerConfig.peerWatermarks = AltTrackerConfig.peerWatermarks or {}
+    return AltTrackerConfig.peerWatermarks[PeerShort(name)] or 0
+end
+local function AdvancePeerWatermark(name, ts)
+    if not ts or ts <= 0 then return end
+    AltTrackerConfig = AltTrackerConfig or {}
+    AltTrackerConfig.peerWatermarks = AltTrackerConfig.peerWatermarks or {}
+    local short = PeerShort(name)
+    if ts > (AltTrackerConfig.peerWatermarks[short] or 0) then
+        AltTrackerConfig.peerWatermarks[short] = ts
+    end
+end
+AltTracker.ResetPeerWatermarks = function() AltTrackerConfig.peerWatermarks = {} end
+
+-- sinceTS > 0 => delta: send only characters changed since the requester last
+-- heard from us. sinceTS <= 0 => full DB (first sync / forced resync).
+local function SerializeFullDB(accountOnly, sinceTS)
 
     local entries = {}
+    sinceTS = sinceTS or 0
 
     -- When accountOnly is true, only send characters whose account field
     -- matches this client's configured account number.  Characters with
@@ -319,7 +349,8 @@ local function SerializeFullDB(accountOnly)
     local myAccount = AltTrackerConfig.accountNumber
 
     for _, c in pairs(AltTrackerDB) do
-        if type(c) == "table" and c.guid then
+        if type(c) == "table" and c.guid
+        and (sinceTS <= 0 or (c.lastUpdate or 0) > sinceTS) then
             if accountOnly and myAccount and myAccount ~= "" then
                 local charAcct = c.account
                 if charAcct and charAcct ~= "" and tostring(charAcct) ~= tostring(myAccount) then
@@ -381,6 +412,7 @@ local function DeserializeFullDB(payload, sender)
 
     local current = {}
     local rejected = 0
+    local maxTS = 0   -- newest lastUpdate seen; the caller advances the peer watermark to it
 
     for line in (payload .. "\n"):gmatch("([^\n]*)\n") do
 
@@ -392,6 +424,11 @@ local function DeserializeFullDB(payload, sender)
             local c = DeserializeChar(msg)
 
             if c and c.guid then
+
+                -- Track the newest timestamp across everything the peer sent
+                -- (even rejected/skipped records) so the watermark advances past
+                -- them and they aren't re-requested next delta.
+                if (c.lastUpdate or 0) > maxTS then maxTS = c.lastUpdate end
 
                 -- Validate immutable fields before merging
                 if not ValidateIncoming(c, sender) then
@@ -431,6 +468,8 @@ local function DeserializeFullDB(payload, sender)
     if AltTracker.RefreshSheet then
         AltTracker.RefreshSheet()
     end
+
+    return maxTS
 
 end
 
@@ -659,7 +698,10 @@ end
 -- target:  required for WHISPER, nil otherwise
 ------------------------------------------------------------
 
-local function SendFullDatabase(channel, target)
+-- sinceTS: when replying to a delta REQ, only the characters changed since the
+-- requester's watermark are sent. Omitted (nil) => full DB (a manual push, where
+-- we don't know what the target already has).
+local function SendFullDatabase(channel, target, sinceTS)
 
     channel = channel or "GUILD"
 
@@ -668,7 +710,7 @@ local function SendFullDatabase(channel, target)
     AltTrackerConfig = AltTrackerConfig or {}
     local accountOnly = not AltTrackerConfig.sendAllAccounts
 
-    local payload = SerializeFullDB(accountOnly)
+    local payload = SerializeFullDB(accountOnly, sinceTS)
     ChunkAndSendPayload(payload, channel, target)
 
 end
@@ -699,7 +741,11 @@ local function RequestCharacters(channel, target, force)
         lastRequestedAt[target] = now
     end
 
-    C_ChatInfo.SendAddonMessage(PREFIX, MSG_REQUEST_V, channel, target)
+    -- Carry our delta watermark for this peer so they can send only what
+    -- changed since we last heard from them. A peer on older code ignores the
+    -- extra payload and replies with a full DB (correct, just unoptimized).
+    local wm = target and GetPeerWatermark(target) or 0
+    C_ChatInfo.SendAddonMessage(PREFIX, MSG_REQUEST_V .. "|" .. wm, channel, target)
     return true
 
 end
@@ -787,7 +833,7 @@ local function RequestResync(peer, reason)
         Print("|cffff8800Sync incomplete|r from " .. peer .. " — " .. reason ..
               " Auto-requesting resync (attempt " .. autoRetryCounts[peer] .. "/2).")
         C_Timer.After(2, function()
-            C_ChatInfo.SendAddonMessage(PREFIX, MSG_REQUEST_V, "WHISPER", peer)
+            C_ChatInfo.SendAddonMessage(PREFIX, MSG_REQUEST_V .. "|" .. GetPeerWatermark(peer), "WHISPER", peer)
         end)
     else
         Print("|cffff0000Sync failed|r from " .. peer .. " — " .. reason ..
@@ -855,7 +901,10 @@ local function CompleteStream(peer, bkey)
         Print("Receiving data from " .. peer .. "...")
         local before = 0
         for _ in pairs(AltTrackerDB) do before = before + 1 end
-        DeserializeFullDB(buffer, peer)
+        local maxTS = DeserializeFullDB(buffer, peer)
+        -- Advance our delta watermark for this peer so the next request only
+        -- pulls what changes after this point.
+        AdvancePeerWatermark(peer, maxTS)
         local after = 0
         for _ in pairs(AltTrackerDB) do after = after + 1 end
         local newChars = after - before
@@ -920,6 +969,8 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
         -- Versioned request — only reply to clients running the same protocol
         if cmd == MSG_REQUEST_V then
+            -- payload is the requester's delta watermark (0 / absent => full DB).
+            local sinceTS = tonumber(payload) or 0
             local replyChannel = (channel == "WHISPER") and "WHISPER" or "GUILD"
             local replyTarget  = (channel == "WHISPER") and senderName or nil
             Print(senderName .. " requested sync — sending data.")
@@ -934,7 +985,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
             for i = 1, #me do seed = seed + string.byte(me, i) end
             local delay = 1 + ((seed + (time() % 1000)) % 30) / 10
             C_Timer.After(delay, function()
-                SendFullDatabase(replyChannel, replyTarget)
+                SendFullDatabase(replyChannel, replyTarget, sinceTS)
             end)
             return
         end
@@ -1681,6 +1732,8 @@ AltTracker._test = {
     SerializeFullDB     = SerializeFullDB,
     DeserializeFullDB   = DeserializeFullDB,
     ChunkAndSendPayload = ChunkAndSendPayload,
+    RequestCharacters   = RequestCharacters,
+    GetPeerWatermark    = GetPeerWatermark,
     GetSyncTargets      = GetSyncTargets,
     CHAR_SEP            = CHAR_SEP,
     MAX_CHUNK           = MAX_CHUNK,
