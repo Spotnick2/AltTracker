@@ -491,6 +491,23 @@ eq(rec.gearlink_head, "|Hitem:111|h", "local-only gearlink_ is preserved across 
 eq(rec.account,       2,   "metadata (account) is preserved when the incoming record omits it")
 
 ------------------------------------------------------------
+-- 24. Single-char (CHAR) receive path respects last-write-wins
+------------------------------------------------------------
+
+WoW.reset()
+AltTrackerDB = { ["Player-CH-1"] = { guid = "Player-CH-1", name = "Cee", class = "MAGE", ilvl = 200, lastUpdate = 1000 } }
+-- An older single-character update (>60s behind) must NOT clobber newer local.
+receive("CHAR|" .. T.SerializeChar(
+    { guid = "Player-CH-1", name = "Cee", class = "MAGE", ilvl = 50, lastUpdate = 900 }
+), "Peer-Realm")
+eq(AltTrackerDB["Player-CH-1"].ilvl, 200, "stale single-char update does not overwrite newer local data")
+-- A newer single-character update is applied.
+receive("CHAR|" .. T.SerializeChar(
+    { guid = "Player-CH-1", name = "Cee", class = "MAGE", ilvl = 260, lastUpdate = 1000 }
+), "Peer-Realm")
+eq(AltTrackerDB["Player-CH-1"].ilvl, 260, "current single-char update is applied")
+
+------------------------------------------------------------
 -- Summary
 ------------------------------------------------------------
 

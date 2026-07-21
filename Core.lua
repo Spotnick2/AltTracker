@@ -181,6 +181,9 @@ local function ValidateIncoming(c, sender)
     return true
 end
 
+-- Our own character name, used to suppress our own broadcast echoes. May be
+-- nil this early (file load runs before PLAYER_LOGIN); refreshed in the login
+-- handler below so self-suppression is reliable for the session.
 local PLAYER_NAME = UnitName("player")
 
 ------------------------------------------------------------
@@ -262,6 +265,13 @@ local function DeserializeChar(msg)
                 pluginPayloads = pluginPayloads or {}
                 pluginPayloads[pid] = v
             else
+                -- Coerce numeric-looking values back to numbers so the UI can
+                -- sort/compare them (level, ilvl, money, skills, timestamps).
+                -- Intentional and safe for this schema: identity/string fields
+                -- (guid, name, realm, class, guild) are never bare numbers, so
+                -- none of them get mis-coerced. Don't "fix" this without a
+                -- per-field type marker — a blanket string keep would break
+                -- numeric sorting.
                 local num = tonumber(v)
                 c[k] = num or v
             end
@@ -506,9 +516,9 @@ end
 
 
 --
--- Called by SendCharacter / SendFullDatabase. Splits the payload into
--- chunks no larger than MAX_CHUNK, computes one checksum over the
--- reassembled stream, and sends each chunk as
+-- Called by SendFullDatabase. Splits the payload into chunks no larger
+-- than MAX_CHUNK, computes one checksum over the reassembled stream, and
+-- sends each chunk as
 --   "CHUNK2|<seq>/<total>|<chunkBody>"
 -- followed by "DONE4|<checksum>".
 --
@@ -638,29 +648,6 @@ local function ChunkAndSendPayload(payload, channel, target)
 end
 
 ------------------------------------------------------------
--- Send single-character update
-------------------------------------------------------------
-
-local function SendCharacter()
-
-    if not AltTracker.ScanCharacter then
-        return
-    end
-
-    local char = AltTracker.ScanCharacter()
-
-    if not char then
-        return
-    end
-
-    -- Prefix with MSG_CHAR on its own line so the receiver can
-    -- identify this stream as a single-character update.
-    local payload = MSG_CHAR .. "\n" .. SerializeChar(char)
-    ChunkAndSendPayload(payload, "GUILD")
-
-end
-
-------------------------------------------------------------
 -- Send full DB  (line-aligned chunks, throttled to avoid packet loss)
 -- channel: "GUILD", "WHISPER", "PARTY", etc.
 -- target:  required for WHISPER, nil otherwise
@@ -755,6 +742,15 @@ local function ReceiveCharacter(c, sender)
     end
 
     local existing = AltTrackerDB[c.guid] or {}
+
+    -- Last-write-wins: keep the local copy only if it is meaningfully newer
+    -- (>60s), matching DeserializeFullDB's merge policy, so a stray older
+    -- single-character update can't clobber fresher data.
+    local existingTime = existing.lastUpdate or 0
+    local incomingTime = c.lastUpdate or 0
+    if existingTime - incomingTime > 60 then
+        return
+    end
 
     ClearSyncedStateFields(existing)
     for k,v in pairs(c) do
@@ -1096,6 +1092,11 @@ frame:SetScript("OnEvent", function(self, event, ...)
         -- get this call to succeed at login time some early CHAT_MSG_ADDON
         -- traffic was being silently dropped on the receiver side.
         C_ChatInfo.RegisterAddonMessagePrefix(PREFIX)
+
+        -- Refresh our own name now that we're in-world; UnitName("player") can
+        -- return nil at file-load, and a nil PLAYER_NAME would silently defeat
+        -- the self-echo suppression check for the whole session.
+        PLAYER_NAME = UnitName("player") or PLAYER_NAME
 
         -- Load the on-demand plugins the user has enabled. Done early (not
         -- inside the 2s sync timer) so the Recipes/Roster tabs appear as
