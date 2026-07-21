@@ -424,7 +424,8 @@ local function ClearSyncedStateFields(t)
         if k:find("^prof_") or k:find("^profmax_")
         or k:find("^gear_") or k:find("^gearq_")
         or k:find("^gearname_") or k:find("^gearid_")
-        or k:find("^gearlink_") then
+        or k:find("^gearlink_")
+        or k:find("^cd_") or k:find("^known_") then  -- craft cooldowns (dynamic cd_<prof>@<label>) + legacy known_ flags
             t[k] = nil
         end
     end
@@ -961,10 +962,6 @@ frame:RegisterEvent("GET_ITEM_INFO_RECEIVED")
 frame:RegisterEvent("PLAYER_MONEY")
 frame:RegisterEvent("PLAYER_UPDATE_RESTING")
 frame:RegisterEvent("PLAYER_XP_UPDATE")
-frame:RegisterEvent("TRADE_SKILL_SHOW")
-frame:RegisterEvent("TRADE_SKILL_UPDATE")
-frame:RegisterEvent("TRADE_SKILL_CLOSE")
-frame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
 frame:RegisterEvent("CHAT_MSG_SYSTEM")    -- detect peer "X has come online" notifications
 
 C_ChatInfo.RegisterAddonMessagePrefix(PREFIX)
@@ -1390,111 +1387,6 @@ frame:SetScript("OnEvent", function(self, event, ...)
             if char then char.lastUpdate = time() end
             if AltTracker.RefreshSheet then AltTracker.RefreshSheet() end
         end
-    end
-
-    --------------------------------------------------------
-    -- Scan profession CDs when tradeskill window opens/updates
-    -- GetTradeSkillCooldown(i) is the only reliable source.
-    --------------------------------------------------------
-
-    if event == "TRADE_SKILL_CLOSE" then
-        frame._tradeSkillOpen = false
-        return
-    end
-
-    if event == "TRADE_SKILL_SHOW" then
-        frame._tradeSkillOpen = true
-    end
-
-    if (event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_UPDATE")
-    and frame._tradeSkillOpen then
-        local defs = AltTracker.ProfCooldownDefs
-        if not defs or not GetNumTradeSkills then return end
-
-        local guid = UnitGUID("player")
-        local char = guid and AltTrackerDB[guid]
-        if not char then return end
-
-        local numSkills = GetNumTradeSkills()
-        local updated = false
-
-        -- Track which CD recipes this character actually knows.
-        -- First clear all known_ flags for this profession window,
-        -- then re-set the ones we find.  This way if a character
-        -- unlearns a recipe (respec) the flag gets removed.
-        local seenKeys = {}
-
-        for i = 1, numSkills do
-            local recipeName, recipeType = GetTradeSkillInfo(i)
-            if recipeName and recipeType ~= "header" then
-                local def = defs[recipeName]
-                if def then
-                    seenKeys[def.key] = true
-
-                    -- Mark recipe as known
-                    if not char["known_" .. def.key] then
-                        char["known_" .. def.key] = 1
-                        updated = true
-                    end
-
-                    local cdSeconds = GetTradeSkillCooldown(i) or 0
-                    local newExpiry = cdSeconds > 0 and (time() + cdSeconds) or 0
-                    if char[def.key] ~= newExpiry then
-                        char[def.key] = newExpiry
-                        updated = true
-                    end
-                end
-            end
-        end
-
-        -- Clear known_ flags for CD recipes NOT found in this scan
-        -- (handles recipe unlearning / profession respec)
-        for _, def in pairs(defs) do
-            if not seenKeys[def.key] and char["known_" .. def.key] then
-                char["known_" .. def.key] = nil
-                char[def.key] = nil  -- also clear the CD itself
-                updated = true
-            end
-        end
-
-        if updated then
-            if AltTracker.RefreshSheet then AltTracker.RefreshSheet() end
-            -- Don't broadcast here — sending chunked addon messages right after
-            -- closing the tradeskill window triggers WOW51900319 disconnects.
-            -- CDs will sync on next natural login/resync.
-        end
-        return
-    end
-
-    --------------------------------------------------------
-    -- Re-scan CDs after a craft completes
-    --------------------------------------------------------
-
-    if event == "UNIT_SPELLCAST_SUCCEEDED" then
-        local unit = ...
-        if unit ~= "player" then return end
-        C_Timer.After(0.5, function()
-            if not frame._tradeSkillOpen then return end
-            if not (GetNumTradeSkills and GetNumTradeSkills() > 0) then return end
-            local guid = UnitGUID("player")
-            local char = guid and AltTrackerDB[guid]
-            if not char then return end
-            local defs = AltTracker.ProfCooldownDefs
-            if not defs then return end
-            for i = 1, GetNumTradeSkills() do
-                local recipeName, recipeType = GetTradeSkillInfo(i)
-                if recipeName and recipeType ~= "header" then
-                    local def = defs[recipeName]
-                    if def then
-                        local cdSeconds = GetTradeSkillCooldown(i) or 0
-                        char[def.key] = cdSeconds > 0 and (time() + cdSeconds) or 0
-                    end
-                end
-            end
-            if AltTracker.RefreshSheet then AltTracker.RefreshSheet() end
-            -- No broadcast here either — avoid flooding
-        end)
-        return
     end
 
 end)

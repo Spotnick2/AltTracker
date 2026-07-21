@@ -256,6 +256,9 @@ local function ScanCurrentTradeskill()
     db.recipes[profName] = {}
     local recipeList = db.recipes[profName]
 
+    local newCds     = {}   -- label -> absolute expiry (recipes currently on cooldown)
+    local seenLabels = {}   -- every craft label seen this scan (for respec/unlearn pruning)
+
     local numSkills = GetNumTradeSkills()
     for i = 1, numSkills do
         local recipeName, recipeType = GetTradeSkillInfo(i)
@@ -292,7 +295,47 @@ local function ScanCurrentTradeskill()
                 numMade    = numMade,
                 reagents   = reagents,
             })
+
+            -- Generic craft-cooldown capture. Collapse a shared-CD family
+            -- ("Transmute: Primal Might", "Transmute: Primal Fire", …) to one label
+            -- by taking the part before the first colon — locale-independent, and
+            -- it dedupes the family to a single entry (they share one expiry).
+            local label = recipeName:match("^([^:]+):") or recipeName
+            seenLabels[label] = true
+            local cd = GetTradeSkillCooldown and GetTradeSkillCooldown(i) or 0
+            if cd and cd > 0 then
+                newCds[label] = time() + cd   -- on cooldown now
+            end
         end
+    end
+
+    -- Write this profession's cooldowns onto the SHARED character record as dynamic
+    -- cd_<prof>@<label> fields. Flat fields ride the normal char sync (no recipe-
+    -- blob coupling) and are read by RowRenderer/Roster/Toasts. A field is dropped
+    -- only when its craft is no longer in the skill list (unlearned / respec); a
+    -- known craft that's merely READY keeps its past expiry so the UI can show
+    -- "Ready" and the cooldown-ready toast can fire. Other professions' fields are
+    -- left untouched (we only ever see one profession's skills per scan).
+    local coreChar = AltTrackerDB and AltTrackerDB[guid]
+    if coreChar then
+        local prefix, cdChanged = "cd_" .. profName .. "@", false
+        for k in pairs(coreChar) do
+            if type(k) == "string" then
+                if k:sub(1, #prefix) == prefix and not seenLabels[k:sub(#prefix + 1)] then
+                    coreChar[k] = nil; cdChanged = true          -- craft unlearned / respec'd away
+                elseif (k:find("^cd_") and not k:find("@", 1, true)) or k:find("^known_") then
+                    coreChar[k] = nil; cdChanged = true          -- purge legacy fixed-key cooldowns
+                end
+            end
+        end
+        for label, expiry in pairs(newCds) do
+            local k = prefix .. label
+            local old = coreChar[k]
+            if not old or math.abs(old - expiry) > 60 then       -- 60s tolerance: ignore scan-timing jitter
+                coreChar[k] = expiry; cdChanged = true
+            end
+        end
+        if cdChanged and AltTracker.TouchCharacter then AltTracker.TouchCharacter(guid) end
     end
 
     -- Mark the character dirty only when this profession's recipes actually
@@ -443,7 +486,8 @@ local function BootstrapPlugin(isOnDemand)
         OnSerialize   = function(g, sinceTS) return SerializePlayer(g, sinceTS) end,
         OnDeserialize = function(g, blob) DeserializePlayer(g, blob) end,
         _test         = { SerializePlayer = SerializePlayer,
-                          DeserializePlayer = DeserializePlayer, RecipeSig = RecipeSig },
+                          DeserializePlayer = DeserializePlayer, RecipeSig = RecipeSig,
+                          ScanCurrentTradeskill = ScanCurrentTradeskill },
     })
 
     -- Force a full baseline so a receiver isn't stranded with a character
@@ -468,6 +512,7 @@ local scanFrame = CreateFrame("Frame")
 scanFrame:RegisterEvent("PLAYER_LOGIN")
 scanFrame:RegisterEvent("TRADE_SKILL_SHOW")
 scanFrame:RegisterEvent("TRADE_SKILL_UPDATE")
+scanFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
 scanFrame:RegisterEvent("GET_ITEM_INFO_RECEIVED")
 
 scanFrame:SetScript("OnEvent", function(self, event, ...)
@@ -477,6 +522,16 @@ scanFrame:SetScript("OnEvent", function(self, event, ...)
     end
     if event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_UPDATE" then
         ScanCurrentTradeskill()
+        return
+    end
+    if event == "UNIT_SPELLCAST_SUCCEEDED" then
+        local unit = ...
+        if unit ~= "player" then return end
+        -- A completed craft sets its cooldown a beat later; re-scan to capture it
+        -- while the tradeskill window is still open (GetTradeSkillLine() ~= nil).
+        C_Timer.After(0.5, function()
+            if GetTradeSkillLine and GetTradeSkillLine() then ScanCurrentTradeskill() end
+        end)
         return
     end
     if event == "GET_ITEM_INFO_RECEIVED" then

@@ -193,13 +193,10 @@ local PROF_FIELDS = {
     { label="Riding",        field="riding",             maxField="ridingMax" },
 }
 
-local COOLDOWN_FIELDS = {
-    { label="Primal Mooncloth", key="cd_Mooncloth" },
-    { label="Shadowcloth",      key="cd_Shadowcloth" },
-    { label="Spellcloth",       key="cd_Spellcloth" },
-    { label="Transmute",        key="cd_Transmute" },
-    { label="Brilliant Glass",  key="cd_BrilliantGlass" },
-}
+-- Craft cooldowns are no longer a fixed list: the Professions plugin captures
+-- them generically as dynamic cd_<prof>@<label> fields on the character record,
+-- and the professions tab renders whatever it finds into a pool of rows.
+local COOLDOWN_ROW_POOL = 16   -- max distinct cooldowns shown at once (plenty for TBC)
 
 local SLOT_LABELS = {
     head="Head", neck="Neck", shoulder="Shoulder", back="Back", chest="Chest", wrist="Wrist", hands="Hands",
@@ -2693,10 +2690,27 @@ local function UpdateProfRows(char)
     if profCooldownHeader then
         profCooldownHeader:Hide()
     end
+
+    -- Gather this character's live craft cooldowns — dynamic cd_<prof>@<label>
+    -- fields written by the Professions plugin — soonest-ready first. Expired
+    -- ones aren't shown (the craft is available again).
+    local cds = {}
+    if char then
+        for k, v in pairs(char) do
+            if type(k) == "string" then
+                local label = k:match("^cd_.-@(.+)$")
+                local ts = label and tonumber(v)
+                if label and ts and ts > 0 then
+                    cds[#cds + 1] = { label = label, ts = ts }
+                end
+            end
+        end
+        table.sort(cds, function(a, b) return a.ts < b.ts end)
+    end
+
     for i, row in ipairs(cooldownRows) do
-        local def = COOLDOWN_FIELDS[i]
-        local ts = char and tonumber(char[def.key]) or nil
-        if ts and ts > 0 then
+        local cd = cds[i]
+        if cd then
             if cooldownShown == 0 and profCooldownHeader then
                 y = y - 4
                 profCooldownHeader:ClearAllPoints()
@@ -2706,11 +2720,12 @@ local function UpdateProfRows(char)
                 y = y - STAT_SECTION_HEADER_GAP
             end
 
-            if ts <= now then
+            row.label:SetText(cd.label)
+            if cd.ts <= now then
                 row.value:SetText("Ready")
                 row.value:SetTextColor(0.45, 1.0, 0.45)
             else
-                row.value:SetText("Ready in " .. DurationText(ts - now))
+                row.value:SetText("Ready in " .. DurationText(cd.ts - now))
                 row.value:SetTextColor(unpack(AltTracker.C.TEXT_NORM))
             end
             row:ClearAllPoints()
@@ -3071,8 +3086,9 @@ local function BuildTabs()
     profCooldownHeader:Hide()
 
     y = y - STAT_SECTION_GAP
-    for i, def in ipairs(COOLDOWN_FIELDS) do
-        local row = CreateStatsRow(tabFrames.professions, y, def.label)
+    for i = 1, COOLDOWN_ROW_POOL do
+        local row = CreateStatsRow(tabFrames.professions, y, "")  -- label set dynamically at render
+        row:Hide()
         cooldownRows[i] = row
         y = y - STAT_ROW_STEP
     end

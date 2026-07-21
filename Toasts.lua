@@ -33,16 +33,10 @@ local TOAST_OFFSET_Y    = 120     -- pixels above screen center
 local NOTIFIED_TTL      = 7*24*3600   -- prune persisted entries older than 7 days
 
 ------------------------------------------------------------
--- Cooldown definitions (mirror of Scanner.lua's ProfCDKeys)
+-- Craft cooldowns are dynamic cd_<prof>@<label> fields on each character record
+-- (written generically by the Professions plugin), so there's no fixed list to
+-- mirror here — ScanCooldowns discovers them directly.
 ------------------------------------------------------------
-
-local CD_DEFS = {
-    { profKey = "Tailoring",     key = "cd_Mooncloth",      name = "Primal Mooncloth", minSkill = 350 },
-    { profKey = "Tailoring",     key = "cd_Shadowcloth",    name = "Shadowcloth",      minSkill = 350 },
-    { profKey = "Tailoring",     key = "cd_Spellcloth",     name = "Spellcloth",       minSkill = 350 },
-    { profKey = "Alchemy",       key = "cd_Transmute",      name = "Transmute",        minSkill = 350 },
-    { profKey = "Jewelcrafting", key = "cd_BrilliantGlass", name = "Brilliant Glass",  minSkill = 350 },
-}
 
 ------------------------------------------------------------
 -- Helpers
@@ -59,21 +53,6 @@ local function IsToastEnabled(profKey)
     if not profs then return true end
     if profs[profKey] == false then return false end
     return true
-end
-
-local function CharHasProfession(char, profKey, minSkill)
-    minSkill = minSkill or 0
-    local skill = tonumber(char["prof_" .. profKey]) or 0
-    if skill >= minSkill then return true end
-    if char.prof1 == profKey then
-        local s = tonumber(char.prof1Skill) or 0
-        if s >= minSkill then return true end
-    end
-    if char.prof2 == profKey then
-        local s = tonumber(char.prof2Skill) or 0
-        if s >= minSkill then return true end
-    end
-    return false
 end
 
 local CLASS_COLORS = {
@@ -303,27 +282,23 @@ local function ScanCooldowns()
 
     for guid, char in pairs(AltTrackerDB) do
         if type(char) == "table" and char.name then
-            for _, def in ipairs(CD_DEFS) do
-                -- For records synced from another account, the known_ flag
-                -- may be absent if the source never logged it.  We still
-                -- trust the CD if the character has the profession AND a
-                -- non-zero CD timestamp is recorded (the timestamp itself
-                -- is proof the recipe was cast at some point).
-                local hasProfSkill = CharHasProfession(char, def.profKey, def.minSkill)
-                local knowsRecipe  = char["known_" .. def.key]
-                local hasCDStamp   = char[def.key] and char[def.key] ~= 0
-                local looksValid   = hasProfSkill and (knowsRecipe or hasCDStamp)
-
-                if IsToastEnabled(def.profKey) and looksValid then
-                    local expiry = char[def.key]
-                    if expiry and expiry > 0 and expiry <= now then
-                        local nKey = guid .. ":" .. def.key .. ":" .. expiry
+            -- Discover cooldowns directly from the character's dynamic
+            -- cd_<prof>@<label> fields. A present field means the character has
+            -- that profession and cast the recipe; once its expiry has passed the
+            -- craft is ready to run again.
+            for k, v in pairs(char) do
+                if type(k) == "string" then
+                    local profKey, label = k:match("^cd_(.-)@(.+)$")
+                    local expiry = label and tonumber(v)
+                    if profKey and expiry and expiry > 0 and expiry <= now
+                    and IsToastEnabled(profKey) then
+                        local nKey = guid .. ":" .. k .. ":" .. expiry
                         if not shown[nKey] then
                             table.insert(ready, {
                                 charName  = char.name,
                                 charClass = char.class or "WARRIOR",
-                                cdName    = def.name,
-                                profKey   = def.profKey,
+                                cdName    = label,
+                                profKey   = profKey,
                             })
                             newlyNotified[nKey] = expiry
                         end

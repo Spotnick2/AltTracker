@@ -911,20 +911,23 @@ function AltTracker.RenderRow(row, char, index, columns)
                 tip.line2 = max and ("Max: "..max) or nil
                 tip.line3 = (max and max > 375 and skill and skill >= 375 and skill < max)
                     and "* Racial bonus cap — functionally maxed" or nil
-                -- Append cooldown info if this profession has tracked CDs
+                -- Append any craft cooldowns for this profession. Cooldowns are
+                -- captured generically by the Professions plugin as dynamic
+                -- cd_<prof>@<label> fields on the record, so we match this
+                -- column's profession and list whatever it holds — no allowlist.
                 tip.cdLines = nil
-                local defs = AltTracker.ProfCDKeys and AltTracker.ProfCDKeys[col.label]
-                if defs and skill and skill > 0 then
-                local cdLines = {}
+                if col.label and skill and skill > 0 then
+                    local prefix = "cd_" .. col.label .. "@"
+                    local plen   = #prefix
+                    local cdLines = {}
                     local now = time()
-                    local shownKeys = {}
-                    for _, cd in ipairs(defs) do
-                        if not shownKeys[cd.key] then
-                            local expiry = char[cd.key]
-                            if expiry ~= nil then
-                                shownKeys[cd.key] = true
-                                if expiry == 0 or expiry <= now then
-                                    table.insert(cdLines, "|cff00ff00"..cd.name..": Ready!|r")
+                    for k, v in pairs(char) do
+                        if type(k) == "string" and k:sub(1, plen) == prefix then
+                            local label  = k:sub(plen + 1)
+                            local expiry = tonumber(v)
+                            if expiry then
+                                if expiry <= now then
+                                    table.insert(cdLines, "|cff00ff00"..label..": Ready!|r")
                                 else
                                     local remaining = expiry - now
                                     local d = math.floor(remaining / 86400)
@@ -938,11 +941,12 @@ function AltTracker.RenderRow(row, char, index, columns)
                                     else
                                         timeStr = m.."m"
                                     end
-                                    table.insert(cdLines, "|cffff8800"..cd.name..": "..timeStr.."|r")
+                                    table.insert(cdLines, "|cffff8800"..label..": "..timeStr.."|r")
                                 end
                             end
                         end
                     end
+                    table.sort(cdLines)
                     if #cdLines > 0 then
                         tip.cdLines = cdLines
                     end

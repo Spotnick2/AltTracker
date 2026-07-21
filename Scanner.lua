@@ -535,39 +535,10 @@ function AltTracker.ScanCharacter()
         AltTracker.ScanReputations(char)
     end
 
-    -- CD definitions are used by Core.lua event handlers and RowRenderer tooltips.
-    -- Actual cooldown scanning happens via TRADE_SKILL_SHOW and UNIT_SPELLCAST_SUCCEEDED
-    -- events in Core.lua — NOT here at login, because GetSpellCooldown is unreliable
-    -- unless the tradeskill window is open.
-    AltTracker.ProfCooldownDefs = {
-        -- Maps tradeskill recipe name → { storageKey, displayName }
-        -- Used when scanning via GetTradeSkillCooldown(i)
-        ["Primal Mooncloth"] = { key="cd_Mooncloth",   profKey="Tailoring", name="Primal Mooncloth"  },
-        ["Shadowcloth"]      = { key="cd_Shadowcloth", profKey="Tailoring", name="Shadowcloth"       },
-        ["Spellcloth"]       = { key="cd_Spellcloth",  profKey="Tailoring", name="Spellcloth"        },
-
-        -- Alchemy: all transmutes share one 2-day CD; any transmute recipe reveals it
-        ["Transmute: Primal Might"]  = { key="cd_Transmute", profKey="Alchemy", name="Transmute" },
-        ["Transmute: Primal Fire"]   = { key="cd_Transmute", profKey="Alchemy", name="Transmute" },
-        ["Transmute: Primal Earth"]  = { key="cd_Transmute", profKey="Alchemy", name="Transmute" },
-        ["Transmute: Primal Water"]  = { key="cd_Transmute", profKey="Alchemy", name="Transmute" },
-        ["Transmute: Primal Air"]    = { key="cd_Transmute", profKey="Alchemy", name="Transmute" },
-        ["Transmute: Primal Mana"]   = { key="cd_Transmute", profKey="Alchemy", name="Transmute" },
-        ["Transmute: Primal Life"]   = { key="cd_Transmute", profKey="Alchemy", name="Transmute" },
-        ["Transmute: Primal Shadow"] = { key="cd_Transmute", profKey="Alchemy", name="Transmute" },
-        ["Transmute: Skyfire Diamond"]   = { key="cd_Transmute", profKey="Alchemy", name="Transmute" },
-        ["Transmute: Earthstorm Diamond"]= { key="cd_Transmute", profKey="Alchemy", name="Transmute" },
-
-        -- Jewelcrafting daily
-        ["Brilliant Glass"] = { key="cd_BrilliantGlass", profKey="Jewelcrafting", name="Brilliant Glass" },
-    }
-
-    -- Summary table used by RowRenderer: which keys to show per profession column
-    AltTracker.ProfCDKeys = {
-        Tailoring    = { {key="cd_Mooncloth",name="Primal Mooncloth"}, {key="cd_Shadowcloth",name="Shadowcloth"}, {key="cd_Spellcloth",name="Spellcloth"} },
-        Alchemy      = { {key="cd_Transmute",name="Transmute"} },
-        Jewelcrafting= { {key="cd_BrilliantGlass",name="Brilliant Glass"} },
-    }
+    -- Craft cooldowns are captured generically by the Professions plugin's
+    -- tradeskill scan (any recipe with GetTradeSkillCooldown(i) > 0), stored as
+    -- dynamic cd_<prof>@<label> fields on the character record, and displayed by
+    -- RowRenderer/Roster. No hand-maintained allowlist here anymore.
 
     --------------------------------------------------------
     -- Gear slots — item level per slot
