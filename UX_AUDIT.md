@@ -14,9 +14,14 @@ This audit focuses on **readability and clarity** polish. Most findings are low/
 severity — the app works well; these are refinements.
 
 **Note on scope:** **Recipes** and **Roster** are separate plugin addons registered at
-runtime via `AltTracker.RegisterPlugin`; their UI code is _not_ in this repository, so
-those two screens were audited from screenshots only. Fixes for them likely live in the
-respective plugin addons.
+runtime via `AltTracker.RegisterPlugin`. Their code lives in sibling repos and **was
+audited at source** for this report:
+- Recipes → `C:\Projects\AltTrackerProfessions` (`AltTrackerProfessions.lua`) — _not a git repo._
+- Roster → `C:\Projects\AltTrackerRoster` (`AltTrackerRoster.lua`) — remote is the old-name
+  repo `Spotnick2/AltTrackerAlts`.
+
+All issues (main addon + both plugins) are filed centrally in `Spotnick2/AltTracker` so they
+track against this one audit; plugin issues are prefixed `[Recipes plugin]` / `[Roster plugin]`.
 
 **Not an issue:** the rainbow strip along the bottom of the Options screenshot is not
 AltTracker — no such element exists in the Lua source; it is another addon / the game UI
@@ -39,9 +44,23 @@ showing behind the panel.
 | I4 | [#4](https://github.com/Spotnick2/AltTracker/issues/4) | Options | "Preview debug mode (AltTracker Roster)" developer diagnostic is exposed to all users (`SheetUI.lua:2052-2082`). Hide behind an advanced/debug gate or remove. | Med |
 | I5 | [#5](https://github.com/Spotnick2/AltTracker/issues/5) | Options | Theme **Dark**/**Class** buttons have no visible active/selected state — can't tell the current selection. | Med |
 | I6 | [#6](https://github.com/Spotnick2/AltTracker/issues/6) | Sidebar | Plugin tab labels (Recipes/Roster) are colored differently than built-in tabs (`MakePluginButton` vs the built-in tab loop) — inconsistent nav. | Low |
-| I7 | [#7](https://github.com/Spotnick2/AltTracker/issues/7) | Recipes _(plugin)_ | learned/not-learned glyph legend is hard to distinguish; the grid is dominated by bright red ✗ noise for normal "not learned" state — soften it. | Low |
+| I7 | [#7](https://github.com/Spotnick2/AltTracker/issues/7) | Recipes _(plugin)_ | Legend uses Unicode `✓`/`✗` (`AltTrackerProfessions.lua:1197`) that render as missing-glyph boxes in the default font, and can't match the ReadyCheck **textures** the grid actually uses (`:853-854`, `:1613-1624`); every not-learned cell also draws a dim red X with no cell tooltip. Root cause detailed in the issue. | Med |
 | I8 | [#8](https://github.com/Spotnick2/AltTracker/issues/8) | Reputations | Footer replaces the char/level/gold totals with the standing legend (`UpdateTotalsBar` `SheetUI.lua:1027-1041`) — inconsistent with every other tab. Consider moving the legend to a tooltip/inline strip. | Low |
 | I9 | [#9](https://github.com/Spotnick2/AltTracker/issues/9) | Headers | C/S/R and icon-only headers rely entirely on hover tooltips (`COL_TOOLTIPS`, `SheetUI.lua:1210`); no persistent cue for new users. | Low |
+
+### Plugin findings (Recipes & Roster)
+
+| # | Area | Finding | Severity |
+|---|------|---------|----------|
+| [#10](https://github.com/Spotnick2/AltTracker/issues/10) | Recipes | Section header count not pluralized → "(1 recipes)" (`AltTrackerProfessions.lua:1485`). | Low |
+| [#11](https://github.com/Spotnick2/AltTracker/issues/11) | Recipes | "Clear" button (`UIPanelButtonTemplate`) and missing-only checkbox (`UICheckButtonTemplate`) are stock Blizzard controls in a custom flat-dark theme — the Clear button is the source of the "red" look (`:1219-1235`). | Med |
+| [#12](https://github.com/Spotnick2/AltTracker/issues/12) | Recipes | Typing in search silently mutates the profession + expansion filters (`MaybeAutoContextSearch` `:752-804`). | Med |
+| [#13](https://github.com/Spotnick2/AltTracker/issues/13) | Recipes | Confusing expansion labels ("World of Warcraft" = Classic) + item-ID-threshold expansion guessing (`:1243-1259`, `:75`). | Low |
+| [#14](https://github.com/Spotnick2/AltTracker/issues/14) | Roster | Pluralization/format: "1 chars", "1 total levels", "Ready in 0m" (`AltTrackerRoster.lua:762, 2838`, `DurationText :381-390`). | Low |
+| [#15](https://github.com/Spotnick2/AltTracker/issues/15) | Roster | Long names/realm/spec truncate with no tooltip; iLvl/GS shown bare with no explanation; only gear buttons have tooltips (`:649-833, 862-895`). | Med |
+| [#16](https://github.com/Spotnick2/AltTracker/issues/16) | Both | Activating a plugin hard-resizes the shared window and never restores it (`AltTrackerProfessions.lua:1663`, `AltTrackerRoster.lua:3425`; neither `Deactivate` restores). | Med |
+| [#17](https://github.com/Spotnick2/AltTracker/issues/17) | Roster | Dead/duplicate code: orphan `AltTrackerRosterModel.lua` (~128 KB, not in `.toc`) + stale git-tracked `AltTrackerAlts.*` / `alts.tga` files. | Low |
+| [#18](https://github.com/Spotnick2/AltTracker/issues/18) | Roster | Many hardcoded colors bypass the theme palette, so the tab won't follow accent/theme changes (`:2711, 2769, 3198-3290`, footer greys `:2838`). | Low |
 
 ## Per-screen notes
 
@@ -63,15 +82,36 @@ clarity gap (I3).
 Has a good color-coded standing legend — but it lives in the footer and displaces the
 totals shown elsewhere (I8). Single-letter standings are compact and readable.
 
-### Recipes _(external plugin)_
-Strong feature set (AH vs craft price, expansion/profession filters, per-character
-learned state). Clarity gaps: the learned/not-learned glyph legend and heavy red-X noise
-(I7). The red "Clear" button reads as destructive for what is just a search reset — minor.
+### Recipes _(plugin — `C:\Projects\AltTrackerProfessions`)_
+Strong feature set (AH vs craft price, expansion/profession filters, per-character learned
+state, collapsible profession sections). Audited at source. Findings:
+- **Legend/marks mismatch (#7):** the legend is Unicode `✓`/`✗` text (`:1197`) that renders
+  as boxes, while the grid uses ReadyCheck **textures** (`:853-854`) — the key can never match
+  the marks. The plugin already avoids Unicode elsewhere for exactly this reason (`:982-984`).
+- **Grid noise (#7):** dim red X on every not-learned cell (`:1620-1622`) plus multi-signal row
+  de-emphasis (darker bg + desaturated icons + greyed text) makes a sparse account a wall of
+  faint red; the cells have no tooltip to disambiguate learned / not-learned / no-data.
+- **Off-theme controls (#11):** "Clear" (`UIPanelButtonTemplate`) and the missing-only checkbox
+  (`UICheckButtonTemplate`) are the only stock Blizzard controls in the panel — that's why Clear
+  looks "red."
+- **Hidden filter mutation (#12)** and **confusing expansion labels (#13)**.
+- **"(1 recipes)" (#10).** Minor extras (audit-only): `FormatMoney` drops copper in the gold
+  branch and always shows silver even when 0 (`:197-209`); dead `% known` column widgets remain.
+- Clean on debug: no user-facing debug toggles in this plugin.
 
-### Roster _(external plugin)_
-The most polished screen — 3D model with per-slot item levels, a detail panel with
-Status/Resources/Attributes/Combat, and account grouping. No blocking issues; lower
-stats scroll off the bottom of the detail panel (expected).
+### Roster _(plugin — `C:\Projects\AltTrackerRoster`)_
+The most polished screen — offline "card" (or live 3D model on the current character) with
+per-slot item levels, a detail panel (Character / Reputations / Professions tabs) covering
+Status/Resources/Attributes/Combat, account grouping, and a totals footer. Audited at source.
+Findings:
+- **Pluralization/format (#14):** "1 chars", "1 total levels", "Ready in 0m".
+- **Truncation + sparse tooltips (#15):** long names/guild/realm/spec are cut with no hover
+  fallback; only gear buttons have tooltips; iLvl and GearScore are unexplained.
+- **Window not restored (#16)** — shared with Recipes.
+- **Debug UI reachable by users:** the "Preview debug mode" checkbox (tracked as I4/#4 in the
+  main addon) overlays `Debug: …` text on the card and opens a diagnostics window.
+- **Dead/duplicate code (#17)** and **hardcoded colors bypassing the theme (#18).**
+- Performance smell (audit-only): every row hover re-runs the full `RenderSelector()` relayout.
 
 ### Options
 Well-organized into Appearance / Roster / Presentation / Account & Sync / Sync Peers /
