@@ -37,6 +37,11 @@ local function EnsureDefaults()
             Jewelcrafting = true,
         }
     end
+    -- On-demand plugins (LoadOnDemand addons AltTracker loads at login when
+    -- enabled here). Default both on so existing users keep both tabs.
+    if not AltTrackerConfig.plugins then
+        AltTrackerConfig.plugins = { professions = true, roster = true }
+    end
     -- Appearance defaults
     AltTrackerConfig.theme = AltTrackerConfig.theme or "dark"
     if AltTrackerConfig.scale == nil then

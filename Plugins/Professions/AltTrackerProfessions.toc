@@ -1,0 +1,12 @@
+## Interface: 20504
+## Title: AltTracker Professions
+## Notes: Recipe scanning plugin for AltTracker. Tracks known profession recipes across all your alts and provides a searchable interface inside the AltTracker window.
+## Author: (plugin)
+## Version: 1.0.0
+## Dependencies: AltTracker
+## OptionalDeps: Auctionator
+## LoadOnDemand: 1
+## SavedVariables: AltTrackerProfessionsDB
+
+RecipeDB.lua
+AltTrackerProfessions.lua

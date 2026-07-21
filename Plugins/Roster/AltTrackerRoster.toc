@@ -1,0 +1,10 @@
+## Interface: 20505
+## Title: AltTracker Roster
+## Notes: Narcissus-inspired offline roster viewer plugin for AltTracker.
+## Author: Spotnick
+## Version: 1.0.0
+## Dependencies: AltTracker
+## LoadOnDemand: 1
+## SavedVariables: AltTrackerRosterDB AltTrackerAltsDB
+
+AltTrackerRoster.lua

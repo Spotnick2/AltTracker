@@ -2083,16 +2083,8 @@ local function CreateFrameIfNeeded()
 
     Y = Y - 42
 
-    -- ── Presentation section ──────────────────────────────
-    -- Camera presentation, frame shift, continuous orbit, open animation,
-    -- and the minimap-button toggle all live here so users find them in
-    -- the same place they configure scale/theme.
-    local optPresHdr = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    optPresHdr:SetPoint("TOPLEFT", P, Y)
-    optPresHdr:SetText("PRESENTATION")
-    optPresHdr:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
-    Y = Y - 20
-
+    -- Shared builder for the checkbox rows below (plugins, presentation,
+    -- toasts). Defined here so the Plugins section can use it too.
     local function MakeOptCheckRow(savedKey, label, anchorY, onClick, getter)
         local cb = CreateFrame("CheckButton", nil, optionsFrame, "UICheckButtonTemplate")
         cb:SetSize(18, 18)
@@ -2115,6 +2107,50 @@ local function CreateFrameIfNeeded()
         lbl:SetTextColor(unpack(AltTracker.C.TEXT_NORM))
         return cb
     end
+
+    -- ── Plugins section ────────────────────────────────────
+    -- Recipes and Roster are LoadOnDemand addons; toggling one loads it
+    -- immediately (enable) or persists the choice (disable, next /reload)
+    -- via AltTracker.SetPluginEnabled.
+    local optPluginsHdr = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    optPluginsHdr:SetPoint("TOPLEFT", P, Y)
+    optPluginsHdr:SetText("PLUGINS")
+    optPluginsHdr:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+    Y = Y - 20
+
+    local optPluginChecks = {}
+    for _, p in ipairs(AltTracker.LOD_PLUGINS or {}) do
+        local key = p.key
+        optPluginChecks[key] = MakeOptCheckRow(nil, p.label, Y,
+            function(checked)
+                if AltTracker.SetPluginEnabled then
+                    AltTracker.SetPluginEnabled(key, checked)
+                end
+            end,
+            function()
+                return AltTracker.IsPluginEnabled and AltTracker.IsPluginEnabled(key)
+            end)
+        Y = Y - 22
+    end
+
+    local optPluginsHint = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    optPluginsHint:SetPoint("TOPLEFT", P, Y - 2)
+    optPluginsHint:SetPoint("RIGHT", optionsFrame, "RIGHT", -P, 0)
+    optPluginsHint:SetJustifyH("LEFT")
+    optPluginsHint:SetWordWrap(true)
+    optPluginsHint:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+    optPluginsHint:SetText("Enabling loads the tab immediately; disabling takes effect after /reload. (Both must also stay enabled in the game's AddOns list.)")
+    Y = Y - 34
+
+    -- ── Presentation section ──────────────────────────────
+    -- Camera presentation, frame shift, continuous orbit, open animation,
+    -- and the minimap-button toggle all live here so users find them in
+    -- the same place they configure scale/theme.
+    local optPresHdr = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    optPresHdr:SetPoint("TOPLEFT", P, Y)
+    optPresHdr:SetText("PRESENTATION")
+    optPresHdr:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+    Y = Y - 20
 
     local optCameraCheck = MakeOptCheckRow("enableWorldCameraPresentation",
         "World camera presentation when AltTracker opens", Y)
@@ -2359,6 +2395,9 @@ local function CreateFrameIfNeeded()
         local rosterDebug = (AltTrackerRosterDB and AltTrackerRosterDB._debugModelStatus)
             or (AltTrackerAltsDB and AltTrackerAltsDB._debugModelStatus)
         optModelDebugCheck:SetChecked(rosterDebug and true or false)
+        for key, cb in pairs(optPluginChecks) do
+            cb:SetChecked(cb._getter())
+        end
         optCameraCheck:SetChecked(optCameraCheck._getter())
         optOrbitCheck:SetChecked(optOrbitCheck._getter())
         optSaluteCheck:SetChecked(optSaluteCheck._getter())

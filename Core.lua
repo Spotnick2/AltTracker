@@ -1038,6 +1038,14 @@ frame:SetScript("OnEvent", function(self, event, ...)
         -- traffic was being silently dropped on the receiver side.
         C_ChatInfo.RegisterAddonMessagePrefix(PREFIX)
 
+        -- Load the on-demand plugins the user has enabled. Done early (not
+        -- inside the 2s sync timer) so the Recipes/Roster tabs appear as
+        -- soon as the sheet is built. Each plugin's BootstrapPlugin sees
+        -- IsLoggedIn()==true and registers itself immediately.
+        if AltTracker.LoadEnabledPlugins then
+            AltTracker.LoadEnabledPlugins()
+        end
+
         C_Timer.After(2, function()
 
             if AltTracker.ScanCharacter then
@@ -1367,6 +1375,72 @@ end)
 ------------------------------------------------------------
 
 AltTracker.plugins = AltTracker.plugins or {}
+
+------------------------------------------------------------
+-- On-demand plugin loading
+--
+-- Recipes and Roster ship as LoadOnDemand addons (they don't auto-load
+-- at startup). AltTracker loads the ones the user enabled, and the
+-- Options panel toggles them. Enabling loads immediately; disabling
+-- only persists (WoW can't unload an addon until the next /reload).
+------------------------------------------------------------
+
+AltTracker.LOD_PLUGINS = {
+    { key = "professions", addon = "AltTrackerProfessions", label = "Recipes" },
+    { key = "roster",      addon = "AltTrackerRoster",      label = "Roster"  },
+}
+
+-- Client-compat wrappers: the classic globals exist in 2.5.5, but fall
+-- back to the C_AddOns namespace if a future client drops them.
+local function IsPluginLoaded(addon)
+    if C_AddOns and C_AddOns.IsAddOnLoaded then return C_AddOns.IsAddOnLoaded(addon) end
+    return IsAddOnLoaded and IsAddOnLoaded(addon)
+end
+
+local function LoadPluginAddon(addon)
+    local loader = (C_AddOns and C_AddOns.LoadAddOn) or LoadAddOn
+    if not loader then return false, "no loader" end
+    return loader(addon)
+end
+
+function AltTracker.IsPluginEnabled(key)
+    return not (AltTrackerConfig and AltTrackerConfig.plugins
+                and AltTrackerConfig.plugins[key] == false)
+end
+
+-- Load every enabled plugin that isn't already loaded. Called at login.
+function AltTracker.LoadEnabledPlugins()
+    AltTrackerConfig = AltTrackerConfig or {}
+    AltTrackerConfig.plugins = AltTrackerConfig.plugins or {}
+    for _, p in ipairs(AltTracker.LOD_PLUGINS) do
+        if AltTracker.IsPluginEnabled(p.key) and not IsPluginLoaded(p.addon) then
+            local ok, err = LoadPluginAddon(p.addon)
+            if not ok then
+                DEFAULT_CHAT_FRAME:AddMessage(
+                    "|cff00ccff[AltTracker]|r could not load "..p.label.." ("..p.addon.."): "..tostring(err))
+            end
+        end
+    end
+end
+
+-- Toggle a plugin from the Options panel. Persists the choice; enabling
+-- loads the addon on the spot (its BootstrapPlugin registers the tab live).
+function AltTracker.SetPluginEnabled(key, enabled)
+    AltTrackerConfig = AltTrackerConfig or {}
+    AltTrackerConfig.plugins = AltTrackerConfig.plugins or {}
+    AltTrackerConfig.plugins[key] = enabled and true or false
+    if enabled then
+        for _, p in ipairs(AltTracker.LOD_PLUGINS) do
+            if p.key == key and not IsPluginLoaded(p.addon) then
+                local ok, err = LoadPluginAddon(p.addon)
+                if not ok then
+                    DEFAULT_CHAT_FRAME:AddMessage(
+                        "|cff00ccff[AltTracker]|r could not load "..p.label.." ("..p.addon.."): "..tostring(err))
+                end
+            end
+        end
+    end
+end
 
 function AltTracker.RegisterPlugin(plugin)
     if not plugin or not plugin.id or not plugin.label or not plugin.OnActivate then
