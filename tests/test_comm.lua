@@ -257,6 +257,122 @@ receive("DONE" .. T.PROTOCOL_VERSION .. "|00000000", "Tester-Realm")
 eq(dbCount(), 0, "our own packets (sender == player) are ignored")
 
 ------------------------------------------------------------
+-- 12. Account-only serialization filter
+------------------------------------------------------------
+
+WoW.reset()
+AltTrackerConfig = { accountNumber = 2 }
+AltTrackerDB = {
+    ["Player-Acct-mine"]  = { guid = "Player-Acct-mine",  name = "Mine",  class = "MAGE",   level = 70, account = 2, lastUpdate = 1 },
+    ["Player-Acct-other"] = { guid = "Player-Acct-other", name = "Other", class = "ROGUE",  level = 70, account = 5, lastUpdate = 1 },
+    ["Player-Acct-untag"] = { guid = "Player-Acct-untag", name = "Untag", class = "PRIEST", level = 70,              lastUpdate = 1 },
+}
+local mineOnly = T.SerializeFullDB(true)
+check(mineOnly:find("Player-Acct-mine",  1, true), "account filter includes my-account char")
+check(mineOnly:find("Player-Acct-untag", 1, true), "account filter includes untagged char")
+check(not mineOnly:find("Player-Acct-other", 1, true), "account filter excludes a different account's char")
+check(T.SerializeFullDB(false):find("Player-Acct-other", 1, true), "unfiltered serialize includes every account")
+
+------------------------------------------------------------
+-- 13. Oversized line is byte-split across chunks and reassembled byte-exact
+------------------------------------------------------------
+
+WoW.reset()
+local bigVal = string.rep("Z", 400)   -- one field far larger than MAX_CHUNK
+check(#("notes:" .. bigVal) > T.MAX_CHUNK, "the notes line exceeds MAX_CHUNK (" .. T.MAX_CHUNK .. ")")
+AltTrackerDB = { ["Player-Big-1"] = { guid = "Player-Big-1", name = "Big", class = "WARRIOR", level = 70, notes = bigVal, lastUpdate = 1000 } }
+T.ChunkAndSendPayload(T.SerializeFullDB(false), "WHISPER", "Big")
+WoW.flushTimers()
+local bigChunks = splitWire(WoW.sentMessages())
+check(#bigChunks >= 3, "an oversized line is split into several chunks")
+AltTrackerDB = {}
+WoW.chat = {}
+for _, m in ipairs(WoW.sentMessages()) do receive(m, "Big-Realm") end
+check(not chatHas("mismatch"), "oversized-line stream checksums correctly")
+eq(AltTrackerDB["Player-Big-1"] and AltTrackerDB["Player-Big-1"].notes, bigVal, "oversized field value reassembled byte-exact")
+
+------------------------------------------------------------
+-- 14. Merge clears stale profession fields when a peer drops a profession
+------------------------------------------------------------
+
+WoW.reset()
+AltTrackerDB = { ["Player-Prof-1"] = { guid = "Player-Prof-1", name = "Pro", class = "WARRIOR", level = 70, prof1 = "Mining", prof_Mining = 300, lastUpdate = 1000 } }
+T.DeserializeFullDB(T.SerializeChar(
+    { guid = "Player-Prof-1", name = "Pro", class = "WARRIOR", level = 70, lastUpdate = 1000 }
+) .. "\n" .. T.CHAR_SEP, "Peer")
+eq(AltTrackerDB["Player-Prof-1"].prof_Mining, nil, "stale prof_ field cleared on merge")
+eq(AltTrackerDB["Player-Prof-1"].prof1, nil, "stale prof1 cleared on merge")
+
+------------------------------------------------------------
+-- 15. Plugin per-character payload round-trips through serialization
+------------------------------------------------------------
+
+WoW.reset()
+local delivered = {}
+AltTracker.plugins = {
+    { id = "demo",
+      OnSerialize   = function(guid) return "blob-for:" .. guid end,
+      OnDeserialize = function(guid, blob) delivered[guid] = blob end },
+}
+local ps = T.SerializeChar({ guid = "Player-Plug-1", name = "Plug", class = "MAGE", level = 70, lastUpdate = 1 })
+check(ps:find("plugin_demo:blob-for:Player-Plug-1", 1, true), "plugin data serialized as plugin_<id>:<blob>")
+T.DeserializeChar(ps)
+eq(delivered["Player-Plug-1"], "blob-for:Player-Plug-1", "plugin OnDeserialize receives its blob for the char")
+AltTracker.plugins = {}   -- reset so it doesn't affect other cases
+
+------------------------------------------------------------
+-- 16. Name change for an existing guid is rejected
+------------------------------------------------------------
+
+WoW.reset()
+AltTrackerDB = { ["Player-Name-1"] = { guid = "Player-Name-1", name = "Alice", class = "MAGE", level = 70, lastUpdate = 500 } }
+T.DeserializeFullDB(T.SerializeChar(
+    { guid = "Player-Name-1", name = "Bob", class = "MAGE", level = 70, lastUpdate = 600 }
+) .. "\n" .. T.CHAR_SEP, "Peer")
+eq(AltTrackerDB["Player-Name-1"].name, "Alice", "name change rejected — original retained")
+check(chatHas("name changed") or chatHas("Rejected"), "name-change rejection reported")
+
+------------------------------------------------------------
+-- 17. Malformed / out-of-range chunks are discarded and reported
+------------------------------------------------------------
+
+WoW.reset()
+AltTrackerDB = {}
+receive("CHUNK3|not-a-valid-header", "Junk-Realm")
+check(chatHas("Malformed"), "malformed chunk header is reported")
+WoW.chat = {}
+receive("CHUNK3|9/3|" .. T.Base64Encode("x"), "Junk-Realm")
+check(chatHas("Out-of-range"), "out-of-range seq (seq > total) is reported")
+eq(T.Base64Decode("@@@@"), nil, "malformed base64 body decodes to nil")
+
+------------------------------------------------------------
+-- 18. DONE with no received chunks is a safe no-op
+------------------------------------------------------------
+
+WoW.reset()
+AltTrackerDB = {}
+receive("DONE" .. T.PROTOCOL_VERSION .. "|00000000", "Ghost-Realm")
+eq(dbCount(), 0, "DONE with no buffered chunks stores nothing and does not error")
+
+------------------------------------------------------------
+-- 19. Duplicate chunk delivery is idempotent
+------------------------------------------------------------
+
+WoW.reset()
+seedDB("Player-Dup-", 4)
+T.ChunkAndSendPayload(T.SerializeFullDB(false), "WHISPER", "Dup")
+WoW.flushTimers()
+local dupChunks, dupDone = splitWire(WoW.sentMessages())
+AltTrackerDB = {}
+WoW.chat = {}
+receive(dupChunks[1], "Dup-Realm")
+receive(dupChunks[1], "Dup-Realm")   -- same seq delivered twice
+for i = 2, #dupChunks do receive(dupChunks[i], "Dup-Realm") end
+receive(dupDone, "Dup-Realm")
+check(not chatHas("mismatch"), "duplicate chunk does not corrupt reassembly")
+eq(dbCount(), 4, "duplicate chunk delivery is idempotent")
+
+------------------------------------------------------------
 -- Summary
 ------------------------------------------------------------
 
