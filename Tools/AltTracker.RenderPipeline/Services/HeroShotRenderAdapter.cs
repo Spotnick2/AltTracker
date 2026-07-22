@@ -207,14 +207,13 @@ public sealed class HeroShotRenderAdapter : IRenderAdapter
 
     private static IHeroShotRenderProvider CreateProvider(AppConfig.HeroShotConfig cfg, RunLogger logger)
     {
-        var provider = (cfg.Provider ?? "openai").Trim().ToLowerInvariant();
+        var provider = (cfg.Provider ?? "codex").Trim().ToLowerInvariant();
         return provider switch
         {
-            "openai"          => new OpenAiHeroShotProvider(cfg, logger),
-            "browserchatgpt"  => new BrowserChatGptProvider(cfg, logger),
-            "manual"          => new ManualHeroShotProvider(cfg, logger),
+            "codex"   => new CodexImagegenProvider(cfg, logger),
+            "manual"  => new ManualHeroShotProvider(cfg, logger),
             _ => throw new PipelineDataException(
-                     $"HeroShot: Unknown provider '{cfg.Provider}'. Supported: openai, browserchatgpt, manual")
+                     $"HeroShot: Unknown provider '{cfg.Provider}'. Supported: codex, manual")
         };
     }
 }

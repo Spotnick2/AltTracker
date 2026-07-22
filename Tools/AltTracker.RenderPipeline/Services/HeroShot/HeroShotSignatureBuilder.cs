@@ -24,7 +24,7 @@ public static class HeroShotSignatureBuilder
             ["style"] = cfg.Style ?? "realistic",
             ["promptTemplateVersion"] = cfg.PromptTemplateVersion ?? "v1",
             ["generationVersion"] = cfg.GenerationVersion ?? "1",
-            ["provider"] = cfg.Provider ?? "openai",
+            ["provider"] = cfg.Provider ?? "codex",
             ["model"] = cfg.Model ?? "gpt-image-1",
             ["width"] = cfg.Width,
             ["height"] = cfg.Height,

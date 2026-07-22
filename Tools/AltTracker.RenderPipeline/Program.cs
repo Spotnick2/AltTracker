@@ -32,14 +32,9 @@ try
     logger.Info($"Render candidates selected: {plan.Jobs.Count}");
     logger.Info($"Skipped unchanged characters: {plan.SkippedCount}");
     logger.Info($"Render spec: {config.RenderSpec.Width}x{config.RenderSpec.Height}, transparentPreferred={config.RenderSpec.PreferTransparentBackground}, framing={config.RenderSpec.FramingPreset}");
-    logger.Info($"WMVx policy: preferredClient={config.WmvxPolicy.PreferredClientProfile}, fallbackClient={config.WmvxPolicy.FallbackClientProfile}, allowAnyWorking={config.WmvxPolicy.AllowAnyWorkingClientProfile}, missingItemPolicy={config.WmvxPolicy.MissingItemPolicy}");
 
-    IRenderAdapter adapter = config.RenderBackend switch
-    {
-        "WowConverter" => new WowConverterRenderAdapter(),
-        "HeroShot" => new HeroShotRenderAdapter(),
-        _ => new ManualWmvxRenderAdapter()
-    };
+    // HeroShot (codex imagegen) is the only render backend.
+    IRenderAdapter adapter = new HeroShotRenderAdapter();
     logger.Info($"Render backend: {config.RenderBackend}");
     var renderResult = adapter.Execute(plan.Jobs, config, options, logger);
 
