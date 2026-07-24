@@ -249,6 +249,7 @@ do
             savedViewSlot = math.floor(self:_Clamp(AltTrackerConfig.worldCameraSavedViewSlot, 2, 5, 5)),
             continuousOrbit = AltTrackerConfig.worldCameraContinuousOrbit == true,
             orbitSpeed    = self:_Clamp(AltTrackerConfig.worldCameraOrbitSpeed, 0.001, 0.05, 0.005),
+            hideGameUI    = AltTrackerConfig.hideGameUIOnPresentation ~= false,   -- Alt+Z-style clean showcase (default on)
         }
     end
 
@@ -570,6 +571,7 @@ do
         if self.animFrame then
             self.animFrame:Show()
         end
+        self:HideGameUI()
         CameraDebug("enter start")
     end
 
@@ -577,6 +579,7 @@ do
         if not self.active or self.mode == "exit" then
             return
         end
+        self:RestoreGameUI()
         self:_StopYaw()
 
         self.mode         = "exit"
@@ -597,6 +600,7 @@ do
     end
 
     function AltTrackerCameraPresentation:ForceRestore(reason)
+        self:RestoreGameUI()
         self:_StopYaw()
         if self.animFrame then
             self.animFrame:Hide()
@@ -629,6 +633,71 @@ do
         CameraDebug("restored: " .. tostring(reason or "force"))
     end
 
+    -- ── Optional game-UI hide (Narcissus-style clean showcase) ──────────────
+    -- Reparents the AltTracker sheet out from under UIParent, then hides
+    -- UIParent so the game UI and other addons vanish while the 3D character
+    -- (WorldFrame) and the sheet stay visible.
+    --
+    -- Combat-safe: toggling UIParent's own visibility does NOT taint its secure
+    -- children (unlike hiding action bars individually), and SetParent on our
+    -- non-secure sheet is allowed in combat. HideGameUI bails in combat; every
+    -- restore path (Exit + ForceRestore on combat/logout/reload) calls
+    -- RestoreGameUI, so the UI can never stay stuck hidden.
+    function AltTrackerCameraPresentation:HideGameUI()
+        if self.uiHidden then return end
+        if not (self.config and self.config.hideGameUI) then return end
+        local sheet = self.sheetFrame
+        if not sheet or not UIParent or not WorldFrame then return end
+        if InCombatLockdown and InCombatLockdown() then return end
+
+        self.uiSavedParent = sheet:GetParent() or UIParent
+        self.uiSavedStrata = sheet:GetFrameStrata()
+        self.uiSavedScale  = sheet:GetScale()
+
+        local ok = pcall(function()
+            -- Keep on-screen size stable: WorldFrame renders at native scale,
+            -- UIParent is UI-scaled, so rescale by the ratio when we move over.
+            local uiEff = UIParent.GetEffectiveScale and UIParent:GetEffectiveScale() or 1
+            local wfEff = WorldFrame.GetEffectiveScale and WorldFrame:GetEffectiveScale() or 1
+            sheet:SetParent(WorldFrame)
+            sheet:SetFrameStrata("FULLSCREEN_DIALOG")
+            if wfEff and wfEff > 0 then
+                sheet:SetScale((self.uiSavedScale or 1) * (uiEff / wfEff))
+            end
+            -- Hide via UIParent:Hide() rather than SetUIVisibility(false): the
+            -- latter enters the game's "UI hidden" state where the FIRST Esc only
+            -- restores the UI (forcing a second Esc to actually close the sheet).
+            -- UIParent:Hide() keeps IsUIVisible() true, so Esc closes the sheet
+            -- directly and our Exit restores the UI — one press. Toggling the
+            -- parent's visibility doesn't taint its secure children, and our
+            -- WorldFrame-reparented sheet stays visible through it.
+            UIParent:Hide()
+        end)
+        if ok then
+            self.uiHidden = true
+        else
+            self:RestoreGameUI()   -- roll back any half-applied state
+        end
+    end
+
+    function AltTrackerCameraPresentation:RestoreGameUI()
+        if not self.uiHidden and not self.uiSavedParent then return end
+        local sheet = self.sheetFrame
+        self.uiHidden = false   -- clear BEFORE UIParent:Show() so our own restore
+                                -- doesn't re-enter through the Esc OnShow hook below
+        pcall(function()
+            if UIParent and UIParent.Show then UIParent:Show() end
+            if sheet then
+                sheet:SetParent(self.uiSavedParent or UIParent)
+                if self.uiSavedScale  then sheet:SetScale(self.uiSavedScale) end
+                if self.uiSavedStrata then sheet:SetFrameStrata(self.uiSavedStrata) end
+            end
+        end)
+        self.uiSavedParent = nil
+        self.uiSavedScale  = nil
+        self.uiSavedStrata = nil
+    end
+
     AltTrackerCameraPresentation.animFrame = CreateFrame("Frame")
     AltTrackerCameraPresentation.animFrame:Hide()
     AltTrackerCameraPresentation.animFrame:SetScript("OnUpdate", function(_, elapsed)
@@ -644,6 +713,20 @@ do
             AltTrackerCameraPresentation:ForceRestore(event)
         end
     end)
+
+    -- Esc while the game UI is hidden: the engine restores UIParent on the FIRST
+    -- Esc (consuming it), so the sheet would need a second Esc to close. Hook
+    -- UIParent's show — if it becomes visible while we still hold it "hidden", the
+    -- user pressed Esc, so finish teardown by closing the sheet. RestoreGameUI
+    -- clears uiHidden BEFORE its own UIParent:Show(), so this never self-triggers.
+    if UIParent and type(UIParent.HookScript) == "function" then
+        UIParent:HookScript("OnShow", function()
+            local p = AltTrackerCameraPresentation
+            if p and p.uiHidden and p.sheetFrame and p.sheetFrame:IsShown() then
+                p.sheetFrame:Hide()   -- OnHide -> Exit -> RestoreGameUI (reparent back)
+            end
+        end)
+    end
 
     -- Suppress the engine-level "Are you sure you want to enable this
     -- experimental feature?" popup. Default Blizzard UI registers
@@ -1605,6 +1688,12 @@ local function CreateFrameIfNeeded()
             AltTrackerCameraPresentation:Exit("sheet-hide")
         end
     end)
+
+    -- The camera presentation reparents this sheet out from under UIParent while
+    -- it hides the game UI, so it needs a handle to it.
+    if AltTrackerCameraPresentation then
+        AltTrackerCameraPresentation.sheetFrame = frame
+    end
 
     --------------------------------------------------------
     -- Title bar — full-width, spans the top of the frame.
