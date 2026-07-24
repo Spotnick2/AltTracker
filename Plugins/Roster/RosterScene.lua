@@ -26,6 +26,7 @@ local api = {}
 local root
 local hintText
 local cards = {}
+local animator
 local lastCamp, lastSelected
 
 local DEFAULT_SRC_W = 512
@@ -37,6 +38,8 @@ local DEFAULT_SRC_H = 896
 local SCENE_BACKDROPS = {
     { id = "campsite", label = "Forest Camp",
       file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\roster-campsite.tga", w = 1024, h = 682 },
+    { id = "karazhan", label = "Karazhan",
+      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\karazhan-campsite.tga", w = 1024, h = 682 },
     { id = "plain",    label = "Plain (dark)", file = nil },
 }
 local curBackdrop = 1     -- index into SCENE_BACKDROPS
@@ -240,28 +243,50 @@ end
 local function ReleaseCards(fromIndex)
     for i = fromIndex, #cards do
         cards[i].char = nil
+        cards[i]._carousel = false
+        cards[i]._c = nil
         cards[i]:EnableMouse(false)
         cards[i]:Hide()
     end
 end
 
+-- Move the carousel selection one character left/right (wrapping). Drives the animation.
+local function StepSelection(delta)
+    local camp = lastCamp
+    if not camp or #camp < 2 then return end
+    local idx = 1
+    for i = 1, #camp do
+        if camp[i].guid == lastSelected then idx = i; break end
+    end
+    idx = ((idx - 1 + delta) % #camp) + 1
+    if api.onSelect then api.onSelect(camp[idx].guid) end
+end
+
 -- ── Cutout binding (Phase B, hero-carousel) ─────────────────────────────────
--- Places one transparent cutout at a computed center-x, scaled to targetH, standing on
--- the shared ground line, dimmed by `brightness`, stacked by `level` (center on top).
-local function BindCutoutAt(card, char, isSelected, xCenter, targetH, brightness, level, minNameW)
+-- Apply a card's *current* (animated) geometry: position, size, and brightness.
+local function ApplyCardGeom(card)
+    local c = card._c
+    if not c then return end
+    local h = math.max(1, c.h)
+    local w = math.max(1, h * (card.aspect or 0.57))
+    card:SetSize(w, h)
+    card:ClearAllPoints()
+    card:SetPoint("BOTTOM", root, "BOTTOMLEFT", c.x, SCENE_NAME_BAND + SCENE_FLOOR_INSET)
+    if card.portrait then card.portrait:SetVertexColor(c.b, c.b, c.b) end
+end
+
+-- Binds the cutout texture + name and sets the geometry TARGET (x / height / brightness)
+-- the animator eases the card toward. Stacking `level` snaps immediately; a brand-new
+-- card snaps straight to its target (no fly-in on first open).
+local function BindCutoutTarget(card, char, isSelected, xCenter, targetH, brightness, level, minNameW)
     card.char = char
+    card._carousel = true
     card:EnableMouse(true)
 
     local cutPath, cw, ch = api.resolveCutout(char)
     cw = tonumber(cw) or DEFAULT_SRC_W
     ch = tonumber(ch) or DEFAULT_SRC_H
-    local h = math.max(1, targetH)
-    local w = math.max(1, cw * (h / ch))
-
-    card:ClearAllPoints()
-    card:SetSize(w, h)
-    card:SetPoint("BOTTOM", root, "BOTTOMLEFT", xCenter, SCENE_NAME_BAND + SCENE_FLOOR_INSET)
-    card:SetFrameLevel(level)
+    card.aspect = cw / ch
 
     card.plate:Hide()
     HideBorder(card)
@@ -271,13 +296,14 @@ local function BindCutoutAt(card, char, isSelected, xCenter, targetH, brightness
     card.portrait:SetAllPoints(card)
     card.portrait:SetTexCoord(0, 1, 0, 1)
     LoadTexture(card.portrait, cutPath)
-    card.portrait:SetVertexColor(brightness, brightness, brightness)
     card.portrait:Show()
 
-    -- name below the feet (all feet share the ground line, so names align on one row)
+    card:SetFrameLevel(level)
+
+    -- name follows the card (anchored to its bottom edge, so it moves with the animation)
     card.name:ClearAllPoints()
     card.name:SetPoint("TOP", card, "BOTTOM", 0, -3)
-    card.name:SetWidth(math.max(minNameW, w))
+    card.name:SetWidth(math.max(minNameW, targetH * card.aspect))
     card.name:SetText(char.name or "?")
     if isSelected then
         card.name:SetFontObject("GameFontNormalLarge")
@@ -289,12 +315,21 @@ local function BindCutoutAt(card, char, isSelected, xCenter, targetH, brightness
     end
     card.name:Show()
 
+    card._t = card._t or {}
+    card._t.x, card._t.h, card._t.b = xCenter, targetH, brightness
+    card._settled = false
+    if not card._c then
+        card._c = { x = xCenter, h = targetH, b = brightness }  -- new card: snap
+    end
+    ApplyCardGeom(card)
     card:Show()
 end
 
 -- ── Framed-card binding (Phase A fallback) ──────────────────────────────────
 local function BindCard(card, char, selected, cardW, cardH, x)
     card.char = char
+    card._carousel = false
+    card._c = nil   -- drop carousel tween state so re-entering cutout mode snaps
     card:EnableMouse(true)
 
     card:ClearAllPoints()
@@ -484,6 +519,53 @@ function RosterScene.Build(parent, callbacks)
     hintText:SetText("No characters to display.")
     hintText:Hide()
 
+    -- carousel navigation arrows (shown only in cutout mode with >1 character)
+    local function MakeArrow(glyph, side, xo)
+        local b = CreateFrame("Button", nil, root)
+        b:SetSize(38, 66)
+        b:SetPoint(side, root, side, xo, 16)
+        b:SetFrameLevel((root:GetFrameLevel() or 1) + 45)
+        b.t = b:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")
+        b.t:SetAllPoints(b)
+        b.t:SetText(glyph)
+        b.t:SetTextColor(1, 0.95, 0.7)
+        b:SetAlpha(0.5)
+        b:SetScript("OnEnter", function(s) s:SetAlpha(1) end)
+        b:SetScript("OnLeave", function(s) s:SetAlpha(0.5) end)
+        b:Hide()
+        return b
+    end
+    root.arrowPrev = MakeArrow("<", "LEFT", 6)
+    root.arrowNext = MakeArrow(">", "RIGHT", -6)
+    root.arrowPrev:SetScript("OnClick", function() StepSelection(-1) end)
+    root.arrowNext:SetScript("OnClick", function() StepSelection(1) end)
+
+    -- carousel animator: eases each card's geometry toward its target each frame
+    animator = CreateFrame("Frame")
+    animator:SetScript("OnUpdate", function(_, dt)
+        if not root or not root:IsShown() then return end
+        local k = 1 - math.exp(-dt * 14)   -- frame-rate-independent easing (~0.2s)
+        for i = 1, #cards do
+            local card = cards[i]
+            if card._carousel and card._c and card._t and card:IsShown() then
+                local c, t = card._c, card._t
+                if math.abs(t.x - c.x) < 0.3 and math.abs(t.h - c.h) < 0.3 and math.abs(t.b - c.b) < 0.004 then
+                    if not card._settled then
+                        c.x, c.h, c.b = t.x, t.h, t.b
+                        ApplyCardGeom(card)
+                        card._settled = true
+                    end
+                else
+                    c.x = c.x + (t.x - c.x) * k
+                    c.h = c.h + (t.h - c.h) * k
+                    c.b = c.b + (t.b - c.b) * k
+                    ApplyCardGeom(card)
+                    card._settled = false
+                end
+            end
+        end
+    end)
+
     root:SetScript("OnSizeChanged", function()
         if root:IsShown() then RosterScene.Render(lastCamp, lastSelected) end
     end)
@@ -517,6 +599,7 @@ function RosterScene.Render(camp, selectedGuid)
     local n = camp and #camp or 0
     if n == 0 then
         hintText:Show()
+        if root.arrowPrev then root.arrowPrev:Hide(); root.arrowNext:Hide() end
         ReleaseCards(1)
         return
     end
@@ -559,10 +642,15 @@ function RosterScene.Render(camp, selectedGuid)
             local x = (k >= 0) and (centerX + off) or (centerX - off)
             local brightness = math.max(0.5, 1 - CAROUSEL_DIM_STEP * ak)
             local level = card._baseLevel + (n - ak)
-            BindCutoutAt(card, char, char.guid == selectedGuid, x, baseH * scale, brightness, level, minNameW)
+            BindCutoutTarget(card, char, char.guid == selectedGuid, x, baseH * scale, brightness, level, minNameW)
+        end
+        if root.arrowPrev then
+            if n > 1 then root.arrowPrev:Show(); root.arrowNext:Show()
+            else root.arrowPrev:Hide(); root.arrowNext:Hide() end
         end
     else
         -- Phase A framed-card fallback
+        if root.arrowPrev then root.arrowPrev:Hide(); root.arrowNext:Hide() end
         local cardW = math.max(1, math.min(CARD_MAX_W, (rW - CARD_GAP * (n + 1)) / n))
         local cardH = math.max(1, rH - CARD_TOP - CARD_BOTTOM)
         local totalW = cardW * n + CARD_GAP * (n - 1)
