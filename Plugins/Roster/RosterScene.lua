@@ -40,6 +40,8 @@ local SCENE_BACKDROPS = {
       file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\roster-campsite.tga", w = 1024, h = 682 },
     { id = "karazhan", label = "Karazhan",
       file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\karazhan-campsite.tga", w = 1024, h = 682 },
+    { id = "darkportal", label = "Dark Portal",
+      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\dark-portal-campsite.tga", w = 1024, h = 682 },
     { id = "plain",    label = "Plain (dark)", file = nil },
 }
 local curBackdrop = 1     -- index into SCENE_BACKDROPS
