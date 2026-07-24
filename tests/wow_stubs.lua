@@ -112,6 +112,20 @@ DEFAULT_CHAT_FRAME = {
 
 RAID_CLASS_COLORS = setmetatable({}, { __index = function() return { r = 1, g = 1, b = 1 } end })
 
+-- Minimal GameTooltip so plugins that hook/append tooltip lines load & bootstrap.
+GameTooltip = {
+    HookScript    = function() end,
+    SetOwner      = function() end,
+    ClearLines    = function() end,
+    AddLine       = function() end,
+    AddDoubleLine = function() end,
+    SetHyperlink  = function() end,
+    NumLines      = function() return 0 end,
+    GetItem       = function() return nil, nil end,
+    Show          = function() end,
+    Hide          = function() end,
+}
+
 -- Addon load state. C_AddOns is intentionally left nil so AltTracker's
 -- loader falls back to these globals, which the tests control.
 function IsAddOnLoaded(name) return WoW.loaded[name] == true end

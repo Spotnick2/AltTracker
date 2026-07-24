@@ -43,7 +43,7 @@ local function EnsureDefaults()
     -- On-demand plugins (LoadOnDemand addons AltTracker loads at login when
     -- enabled here). Default both on so existing users keep both tabs.
     if not AltTrackerConfig.plugins then
-        AltTrackerConfig.plugins = { professions = true, roster = true, instances = true }
+        AltTrackerConfig.plugins = { professions = true, roster = true, instances = true, warband = true }
     end
     -- Delta-sync watermarks: newest lastUpdate value received from each peer,
     -- so a sync request pulls only what changed since. Keyed by short name.

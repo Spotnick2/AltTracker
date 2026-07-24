@@ -1,0 +1,9 @@
+## Interface: 20505
+## Title: AltTracker Warband
+## Notes: Consolidated cross-alt bag + bank inventory for AltTracker
+## Author: AltTracker
+## Dependencies: AltTracker
+## LoadOnDemand: 1
+## SavedVariables: AltTrackerWarbandDB
+
+AltTrackerWarband.lua

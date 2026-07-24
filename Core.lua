@@ -1639,6 +1639,7 @@ AltTracker.LOD_PLUGINS = {
     { key = "professions", addon = "AltTrackerProfessions", label = "Recipes" },
     { key = "roster",      addon = "AltTrackerRoster",      label = "Roster"  },
     { key = "instances",   addon = "AltTrackerInstances",   label = "Raids"   },
+    { key = "warband",     addon = "AltTrackerWarband",     label = "Warband" },
 }
 
 -- Client-compat wrappers: the classic globals exist in 2.5.5, but fall

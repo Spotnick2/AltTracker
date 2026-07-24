@@ -67,7 +67,7 @@ AltTrackerProfessionsDB[guid] = {
 }
 check(T.SerializePlayer(guid, 0)    ~= "", "full sync (sinceTS 0) serializes the recipe blob")
 check(T.SerializePlayer(guid, 500)  ~= "", "recipes changed since watermark are sent")
-eq(T.SerializePlayer(guid, 1000), "", "skip when recipesStamp == watermark")
+check(T.SerializePlayer(guid, 1000) ~= "", "RESEND when recipesStamp == watermark (strict <; else a same-second change is lost)")
 eq(T.SerializePlayer(guid, 2000), "", "skip when watermark is ahead of recipesStamp")
 
 ------------------------------------------------------------
