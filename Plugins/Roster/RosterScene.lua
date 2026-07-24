@@ -45,7 +45,7 @@ local SCENE_BACKDROPS = {
     { id = "sunwell", label = "Sunwell Plateau",
       file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\sunwell-plateau-campsite.tga", w = 1024, h = 682 },
     { id = "zangarmarsh", label = "Zangarmarsh",
-      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\zangarmarsh-coilfang-campsite.tga", w = 1024, h = 682 },
+      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\zangarmarsh-campsite.tga", w = 1024, h = 682 },
     { id = "zulaman", label = "Zul'Aman",
       file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\zulaman-campsite.tga", w = 1024, h = 682 },
     { id = "plain",    label = "Plain (dark)", file = nil },
