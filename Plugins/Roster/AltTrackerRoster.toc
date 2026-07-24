@@ -7,4 +7,5 @@
 ## LoadOnDemand: 1
 ## SavedVariables: AltTrackerRosterDB AltTrackerAltsDB
 
+RosterScene.lua
 AltTrackerRoster.lua

@@ -2859,11 +2859,56 @@ local function UpdateFooter()
     footerRight:SetText("|cffaaaaaa" .. math.floor(totalGold / 10000) .. GOLD_ICON_SM .. " total gold|r")
 end
 
+-- Highlight the active List/Scene toggle button.
+function AT_ALTS._UpdateViewToggle()
+    local btns = AT_ALTS._viewButtons
+    if not btns then return end
+    local mode = (GetUIState().viewMode == "scene") and "scene" or "list"
+    local ar, ag, ab = AltTracker.GetAccentRGB()
+    for id, btn in pairs(btns) do
+        if id == mode then
+            AltTracker.ApplyBGOnly(btn, ar * 0.30, ag * 0.30, ab * 0.30, 0.95)
+            btn.label:SetTextColor(1, 1, 1)
+        else
+            AltTracker.ApplyBGOnly(btn, AltTracker.C.BG_BTN_IDLE[1], AltTracker.C.BG_BTN_IDLE[2], AltTracker.C.BG_BTN_IDLE[3], AltTracker.C.BG_BTN_IDLE[4])
+            btn.label:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+        end
+    end
+end
+
+-- Show/hide the panels for the current view mode. Scene mode hides the
+-- center + stats panels as whole units and shows the RosterScene overlay.
+function AT_ALTS.ApplyViewMode()
+    local scene = (GetUIState().viewMode == "scene")
+    if scene then
+        if centerPanel then centerPanel:Hide() end
+        if statsPanel then statsPanel:Hide() end
+        if AltTracker.RosterScene then AltTracker.RosterScene.SetVisible(true) end
+    else
+        if AltTracker.RosterScene then AltTracker.RosterScene.SetVisible(false) end
+        if centerPanel then centerPanel:Show() end
+        if statsPanel then statsPanel:Show() end
+    end
+    AT_ALTS._UpdateViewToggle()
+end
+
+function AT_ALTS.SetViewMode(mode)
+    GetUIState().viewMode = (mode == "scene") and "scene" or "list"
+    AT_ALTS.ApplyViewMode()
+    AT_ALTS.Refresh()
+end
+
 function AT_ALTS.Refresh()
     if not panel or not AT_ALTS.isActive then return end
     BuildEntries()
     RenderSelector()
-    UpdateDetail()
+    if GetUIState().viewMode == "scene" and AltTracker.RosterScene then
+        local camp = AltTracker.RosterScene.SelectCamp(
+            GetCharacterStore(), AltTrackerConfig and AltTrackerConfig.hideLow, 6)
+        AltTracker.RosterScene.Render(camp, selectedGuid)
+    else
+        UpdateDetail()
+    end
     UpdateFooter()
 end
 
@@ -3393,6 +3438,43 @@ local function BuildPanel(mainFrame)
     BuildFooter()
     BuildDetailPanel()
 
+    -- Scene ("Campsite") view module. Pass the narrow set of file-local helpers it
+    -- needs as callbacks so the module (a separate chunk) stays decoupled.
+    if AltTracker.RosterScene then
+        AltTracker.RosterScene.Build(detailPanel, {
+            resolvePortrait = function(char)
+                local candidates = CollectRenderCandidates(char)
+                local c = candidates and candidates[1]
+                if c and c.path then return c.path, c.sourceWidth, c.sourceHeight end
+            end,
+            classIconPath = ClassIconPath,
+            classDisplay  = function(token) return CLASS_DISPLAY[(token or ""):upper()] end,
+            raceDisplay   = function(char) return char and (RACE_DISPLAY[char.race or ""] or char.race) or nil end,
+            onSelect = function(guid)
+                selectedGuid = guid
+                AltTrackerRosterDB.selectedGuid = guid
+                AT_ALTS.Refresh()
+            end,
+        })
+    end
+
+    -- List / Scene toggle in the selector header (right-aligned, above the divider).
+    do
+        local defs = { { id = "list", label = "List" }, { id = "scene", label = "Scene" } }
+        AT_ALTS._viewButtons = AT_ALTS._viewButtons or {}
+        local BTN_W, BTN_H, GAP = 46, 18, 3
+        for i, d in ipairs(defs) do
+            local btn = CreateFrame("Button", nil, selectorPanel, "BackdropTemplate")
+            btn:SetSize(BTN_W, BTN_H)
+            btn:SetPoint("TOPRIGHT", selectorPanel, "TOPRIGHT", -6 - (#defs - i) * (BTN_W + GAP), -6)
+            btn.label = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            btn.label:SetPoint("CENTER", btn, "CENTER", 0, 0)
+            btn.label:SetText(d.label)
+            btn:SetScript("OnClick", function() AT_ALTS.SetViewMode(d.id) end)
+            AT_ALTS._viewButtons[d.id] = btn
+        end
+    end
+
     if not AT_ALTS._themeCallbackRegistered then
         AltTracker.RegisterThemeCallback(function()
             if not panel then return end
@@ -3400,6 +3482,8 @@ local function BuildPanel(mainFrame)
             local ui = GetUIState()
             SetActiveTab(ui.activeTab or "character")
             RenderSelector()
+            AT_ALTS._UpdateViewToggle()
+            if AltTracker.RosterScene then AltTracker.RosterScene.RepaintTheme() end
         end)
         AT_ALTS._themeCallbackRegistered = true
     end
@@ -3412,8 +3496,12 @@ local function HookRefresh()
     local prev = AltTracker.RefreshSheet
     AltTracker.RefreshSheet = function(...)
         prev(...)
-        if AT_ALTS.isActive then
+        -- Coalesce bursts of RefreshSheet events into a single deferred repaint
+        -- (scene mode lays out several large textures, so avoid re-doing it N times).
+        if AT_ALTS.isActive and not AT_ALTS._refreshPending then
+            AT_ALTS._refreshPending = true
             C_Timer.After(0, function()
+                AT_ALTS._refreshPending = false
                 if AT_ALTS.isActive then
                     AT_ALTS.Refresh()
                 end
@@ -3443,6 +3531,7 @@ function AT_ALTS.Activate(mainFrame)
     panel:Show()
     local ui = GetUIState()
     SetActiveTab(ui.activeTab or "character")
+    AT_ALTS.ApplyViewMode()
     AT_ALTS.Refresh()
 end
 
