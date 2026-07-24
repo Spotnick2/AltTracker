@@ -33,25 +33,29 @@ local DEFAULT_SRC_W = 512
 local DEFAULT_SRC_H = 896
 
 -- Selectable scenic backdrops. Add entries here as TGAs are generated (raid-themed
--- camps, daylight camps, etc.). A nil `file` = the plain procedural floor. Each backdrop
--- is cover-cropped to the panel; `w`/`h` are the TGA's pixel dims (for the crop math).
+-- camps, daylight camps, etc.). A nil `file` = the plain procedural floor.
+-- The TGAs are power-of-two (1024x1024) with the real image in the top `h` rows and the
+-- rest black-padded (WoW needs POT textures to reload reliably). `w`/`h` are the image
+-- (content) pixel dims for the cover-crop; `texh` is the TGA's full height for the remap.
 local SCENE_BACKDROPS = {
     { id = "campsite", label = "Forest Camp",
-      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\roster-campsite.tga", w = 1024, h = 682 },
+      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\scene-forest.tga", w = 1024, h = 682, texh = 1024 },
     { id = "karazhan", label = "Karazhan",
-      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\karazhan-campsite.tga", w = 1024, h = 682 },
+      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\scene-karazhan.tga", w = 1024, h = 682, texh = 1024 },
     { id = "darkportal", label = "Dark Portal",
-      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\dark-portal-campsite.tga", w = 1024, h = 682 },
+      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\scene-darkportal.tga", w = 1024, h = 682, texh = 1024 },
     { id = "sunwell", label = "Sunwell Plateau",
-      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\sunwell-plateau-campsite.tga", w = 1024, h = 682 },
+      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\scene-sunwell.tga", w = 1024, h = 682, texh = 1024 },
     { id = "zangarmarsh", label = "Zangarmarsh",
-      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\zangarmarsh-campsite.tga", w = 1024, h = 682 },
+      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\scene-zangarmarsh.tga", w = 1024, h = 682, texh = 1024 },
     { id = "zulaman", label = "Zul'Aman",
-      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\zulaman-campsite.tga", w = 1024, h = 682 },
+      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\scene-zulaman.tga", w = 1024, h = 682, texh = 1024 },
+    { id = "blacktemple", label = "Black Temple",
+      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\scene-blacktemple.tga", w = 1024, h = 682, texh = 1024 },
     { id = "plain",    label = "Plain (dark)", file = nil },
 }
 local curBackdrop = 1     -- index into SCENE_BACKDROPS
-local curBW, curBH = 1024, 682
+local curBW, curBH, curBTH = 1024, 682, 1024
 
 -- cutout "hero carousel" layout: the selected character is centered and largest,
 -- the rest flank it symmetrically, shrinking and dimming with distance (perspective).
@@ -408,7 +412,9 @@ end
 local function LayoutBackdrop(rW, rH)
     if root and root._hasBackdropImage and root.image then
         local u1, u2, v1, v2 = CoverTexCoord(rW, rH, curBW, curBH)
-        root.image:SetTexCoord(u1, u2, v1, v2)
+        -- the image occupies only the top `curBH/curBTH` of the POT texture; remap v into it
+        local vScale = (curBTH and curBTH > 0) and (curBH / curBTH) or 1
+        root.image:SetTexCoord(u1, u2, v1 * vScale, v2 * vScale)
     end
 end
 
@@ -430,6 +436,7 @@ local function ApplyBackdrop(idx)
 
     if haveImage then
         curBW, curBH = bd.w or 1024, bd.h or 682
+        curBTH = bd.texh or curBH
         root.image:Show()
         if root.ground then root.ground:Hide() end
         if root.horizon then root.horizon:Hide() end
@@ -583,6 +590,10 @@ function RosterScene.SetVisible(show)
     if not root then return end
     if show then
         root:Show()
+        -- Re-apply the backdrop texture now that the scene is actually shown. On /reload the
+        -- Build-time SetTexture can run before the graphics are ready and render black; the
+        -- cutouts survive precisely because Render re-applies their textures. Do the same here.
+        ApplyBackdrop(curBackdrop)
     else
         root:Hide()
         GameTooltip:Hide()
