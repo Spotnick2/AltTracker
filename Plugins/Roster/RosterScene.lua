@@ -31,12 +31,15 @@ local lastCamp, lastSelected
 local DEFAULT_SRC_W = 512
 local DEFAULT_SRC_H = 896
 
--- cutout scene layout
-local SCENE_NAME_BAND   = 26      -- reserved strip at the bottom for name labels
-local SCENE_FLOOR_INSET = 8       -- feet sit this far above the name band
-local SCENE_HEIGHT_FRAC = 0.94    -- character height as a fraction of the usable height
-local SCENE_MAX_W_FRAC  = 1.12    -- cap a character's width at this fraction of its slot
-local SCENE_DIM_UNSEL   = 0.60    -- non-selected cutouts are dimmed to this brightness
+-- cutout "hero carousel" layout: the selected character is centered and largest,
+-- the rest flank it symmetrically, shrinking and dimming with distance (perspective).
+local SCENE_NAME_BAND    = 26     -- reserved strip at the bottom for name labels
+local SCENE_FLOOR_INSET  = 8      -- feet sit this far above the name band
+local SCENE_HEIGHT_FRAC  = 0.96   -- center character height as a fraction of usable height
+local CAROUSEL_SHRINK    = 0.74   -- each step out from center scales by this
+local CAROUSEL_STEP_FRAC = 0.15   -- base horizontal step as a fraction of scene width
+local CAROUSEL_MINSCALE  = 0.42   -- floor on the perspective shrink
+local CAROUSEL_DIM_STEP  = 0.16   -- brightness lost per step out from center
 
 -- framed-card fallback layout (Phase A)
 local CARD_MAX_W  = 160
@@ -231,25 +234,23 @@ local function ReleaseCards(fromIndex)
     end
 end
 
--- ── Cutout binding (Phase B) ────────────────────────────────────────────────
--- Places a transparent cutout scaled to a common height, standing on the ground line.
-local function BindCutout(card, char, selected, slotCenterX, slotW, usableH)
+-- ── Cutout binding (Phase B, hero-carousel) ─────────────────────────────────
+-- Places one transparent cutout at a computed center-x, scaled to targetH, standing on
+-- the shared ground line, dimmed by `brightness`, stacked by `level` (center on top).
+local function BindCutoutAt(card, char, isSelected, xCenter, targetH, brightness, level, minNameW)
     card.char = char
     card:EnableMouse(true)
 
     local cutPath, cw, ch = api.resolveCutout(char)
     cw = tonumber(cw) or DEFAULT_SRC_W
     ch = tonumber(ch) or DEFAULT_SRC_H
-
-    local targetH = usableH * SCENE_HEIGHT_FRAC
-    local maxW = slotW * SCENE_MAX_W_FRAC
-    local scale = math.min(targetH / ch, maxW / cw)
-    local w = math.max(1, cw * scale)
-    local h = math.max(1, ch * scale)
+    local h = math.max(1, targetH)
+    local w = math.max(1, cw * (h / ch))
 
     card:ClearAllPoints()
     card:SetSize(w, h)
-    card:SetPoint("BOTTOM", root, "BOTTOMLEFT", slotCenterX, SCENE_NAME_BAND + SCENE_FLOOR_INSET)
+    card:SetPoint("BOTTOM", root, "BOTTOMLEFT", xCenter, SCENE_NAME_BAND + SCENE_FLOOR_INSET)
+    card:SetFrameLevel(level)
 
     card.plate:Hide()
     HideBorder(card)
@@ -259,29 +260,21 @@ local function BindCutout(card, char, selected, slotCenterX, slotW, usableH)
     card.portrait:SetAllPoints(card)
     card.portrait:SetTexCoord(0, 1, 0, 1)
     LoadTexture(card.portrait, cutPath)
+    card.portrait:SetVertexColor(brightness, brightness, brightness)
     card.portrait:Show()
 
-    -- selection: selected is full-bright and on top; others dimmed
-    if selected then
-        card.portrait:SetVertexColor(1, 1, 1)
-        card:SetFrameLevel(card._baseLevel + 20)
-    else
-        card.portrait:SetVertexColor(SCENE_DIM_UNSEL, SCENE_DIM_UNSEL, SCENE_DIM_UNSEL + 0.03)
-        card:SetFrameLevel(card._baseLevel)
-    end
-
-    -- name label pinned to a shared row in the name band, centered under this slot
+    -- name below the feet (all feet share the ground line, so names align on one row)
     card.name:ClearAllPoints()
-    card.name:SetPoint("BOTTOM", root, "BOTTOMLEFT", slotCenterX, 5)
-    card.name:SetWidth(slotW)
+    card.name:SetPoint("TOP", card, "BOTTOM", 0, -3)
+    card.name:SetWidth(math.max(minNameW, w))
     card.name:SetText(char.name or "?")
-    if selected then
-        local ar, ag, ab = AccentRGB()
+    if isSelected then
+        card.name:SetFontObject("GameFontNormalLarge")
         card.name:SetTextColor(1, 1, 1)
-        local _ = ar + ag + ab
     else
+        card.name:SetFontObject("GameFontHighlightSmall")
         local r, g, b = ClassRGB((char.class or ""):upper())
-        card.name:SetTextColor(r * 0.9, g * 0.9, b * 0.9)
+        card.name:SetTextColor(r * brightness, g * brightness, b * brightness)
     end
     card.name:Show()
 
@@ -433,12 +426,39 @@ function RosterScene.Render(camp, selectedGuid)
     local rH = math.max(1, root:GetHeight())
 
     if CampHasCutouts(camp) then
-        local slotW = rW / n
-        local usableH = math.max(1, rH - SCENE_NAME_BAND - SCENE_FLOOR_INSET - 8)
+        local centerX  = rW / 2
+        local usableH  = math.max(1, rH - SCENE_NAME_BAND - SCENE_FLOOR_INSET - 8)
+        local baseH    = usableH * SCENE_HEIGHT_FRAC
+        local step     = rW * CAROUSEL_STEP_FRAC
+        local minNameW = rW / n
+
+        -- which camp index is selected? (default to the middle so the scene stays centered)
+        local sIdx = math.floor((n + 1) / 2)
+        for i = 1, n do
+            if camp[i].guid == selectedGuid then sIdx = i; break end
+        end
+
+        -- slot k per camp index: selected = 0, the rest fan out +1,-1,+2,-2,...
+        local slotOf = {}
+        slotOf[sIdx] = 0
+        local seq, si = {}, 1
+        for d = 1, n do seq[#seq + 1] = d; seq[#seq + 1] = -d end
+        for i = 1, n do
+            if i ~= sIdx then slotOf[i] = seq[si]; si = si + 1 end
+        end
+
         for i = 1, n do
             local card = EnsureCard(i)
             local char = camp[i]
-            BindCutout(card, char, char.guid == selectedGuid, slotW * (i - 0.5), slotW, usableH)
+            local k    = slotOf[i]
+            local ak   = math.abs(k)
+            local scale = math.max(CAROUSEL_MINSCALE, CAROUSEL_SHRINK ^ ak)
+            local off = 0
+            for j = 0, ak - 1 do off = off + step * (CAROUSEL_SHRINK ^ j) end
+            local x = (k >= 0) and (centerX + off) or (centerX - off)
+            local brightness = math.max(0.5, 1 - CAROUSEL_DIM_STEP * ak)
+            local level = card._baseLevel + (n - ak)
+            BindCutoutAt(card, char, char.guid == selectedGuid, x, baseH * scale, brightness, level, minNameW)
         end
     else
         -- Phase A framed-card fallback
