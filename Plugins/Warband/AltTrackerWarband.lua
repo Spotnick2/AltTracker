@@ -347,16 +347,27 @@ local function DupName(holders, name)
     return c > 1
 end
 
+-- Build the tooltip manually with AddLine rather than SetHyperlink + append:
+-- a hyperlink'd tooltip re-renders itself from the item link (async item-info
+-- callback), which wipes any custom lines appended after it — so the per-alt
+-- breakdown, which is the whole point of this view, would vanish. We show a
+-- quality-coloured item-name header instead and keep full control of the body.
 local function CellOnEnter(self)
     local e = self.entry
     if not e then return end
     GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-    GameTooltip:SetHyperlink("item:" .. e.id)
-    GameTooltip:AddDoubleLine("Total across alts", tostring(e.total), 1, 1, 1, 1, 1, 1)
+    GameTooltip:ClearLines()
+
+    local r, g, b = 1, 1, 1
+    local qc = e.quality and ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[e.quality]
+    if qc then r, g, b = qc.r, qc.g, qc.b end
+    GameTooltip:AddLine(e.name or ("Item " .. e.id), r, g, b)
+    GameTooltip:AddDoubleLine("Total across alts", tostring(e.total), 0.7, 0.7, 0.7, 1, 1, 1)
+    GameTooltip:AddLine(" ")
 
     local holders = {}
-    for _, h in ipairs(e.holders) do holders[#holders + 1] = h end
-    table.sort(holders, function(a, b) return (a.name or "") < (b.name or "") end)
+    for _, h in ipairs(e.holders or {}) do holders[#holders + 1] = h end
+    table.sort(holders, function(a, b2) return (a.name or "") < (b2.name or "") end)
 
     local now = time()
     local stale = false
@@ -365,9 +376,9 @@ local function CellOnEnter(self)
         local nm = h.name or "?"
         if h.realm and DupName(e.holders, h.name) then nm = nm .. "-" .. h.realm end
         local parts = {}
-        if (h.bags or 0) > 0 then parts[#parts + 1] = "Bags: " .. h.bags end
-        if (h.bank or 0) > 0 then parts[#parts + 1] = "Bank: " .. h.bank end
-        GameTooltip:AddDoubleLine(nm, table.concat(parts, ", "), cc.r, cc.g, cc.b, .8, .8, .8)
+        if (h.bags or 0) > 0 then parts[#parts + 1] = "Bags " .. h.bags end
+        if (h.bank or 0) > 0 then parts[#parts + 1] = "Bank " .. h.bank end
+        GameTooltip:AddDoubleLine(nm, table.concat(parts, ", "), cc.r, cc.g, cc.b, 0.85, 0.85, 0.85)
         if (h.bank or 0) > 0 and h.bankStamp and (now - h.bankStamp) > BANK_STALE then stale = true end
     end
     if stale then GameTooltip:AddLine("Bank data may be out of date", .55, .55, .55) end
@@ -394,6 +405,7 @@ local function getCell(i)
     if not cell then
         cell = CreateFrame("Button", nil, content, "BackdropTemplate")
         cell:SetSize(ICON, ICON)
+        cell:EnableMouse(true)
         cell:SetBackdrop({ edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 })
         cell.icon = cell:CreateTexture(nil, "ARTWORK")
         cell.icon:SetPoint("TOPLEFT", 1, -1)
