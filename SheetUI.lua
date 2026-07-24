@@ -1747,6 +1747,121 @@ local function CreateFrameIfNeeded()
     close:SetScript("OnEnter",  function() close:SetBackdropColor(0.35, 0.08, 0.08, 1) end)
     close:SetScript("OnLeave",  function() close:SetBackdropColor(0.18, 0.05, 0.05, 1) end)
 
+    -- Update-reference (screenshot) button — captures a clean shot of the
+    -- presented character for the AI portrait pipeline. The camera presentation
+    -- has already framed/faced the character and hidden the game UI, so we only
+    -- hide THIS window (via alpha, so we don't fire OnHide/Exit and tear the
+    -- presentation down), draw weapons, Screenshot(), then restore. Stamps
+    -- refshot_ts on the player's record for the pipeline to match.
+    local function CaptureReferenceFromSheet()
+        if type(Screenshot) ~= "function" then return end
+        local guid = UnitGUID("player")
+        local char = guid and AltTrackerDB and AltTrackerDB[guid]
+        if not char then
+            print("|cffff8800AltTracker:|r no character record yet — reopen once so it scans.")
+            return
+        end
+
+        -- Which weapon to show. GetSheathState: 1=sheathed, 2=melee drawn,
+        -- 3=ranged drawn. Hunters want the bow (3); everyone else wants their
+        -- main-hand melee weapon (2), NOT their wand. We toggle until the target
+        -- state, re-checking after each (it's animated), then leave extra settle
+        -- time so the draw finishes before the shot (a bow takes a beat).
+        local _, classFile = UnitClass("player")
+        local targetState = (classFile == "HUNTER") and 3 or 2
+        local haveSheath = type(GetSheathState) == "function" and type(ToggleSheath) == "function"
+        local wasSheathed = false
+        if haveSheath then
+            local ok, s0 = pcall(GetSheathState)
+            wasSheathed = (ok and s0 == 1)
+        end
+
+        local saved = {}
+        local function setcv(k, v)
+            if type(GetCVar) == "function" and type(SetCVar) == "function" then
+                saved[k] = GetCVar(k)
+                pcall(SetCVar, k, v)
+            end
+        end
+
+        local function doCapture()
+            -- Center the character (the presentation shifts it aside for this
+            -- window) and hide nameplates (they survive UIParent:Hide).
+            setcv("test_cameraOverShoulder", 0)
+            setcv("nameplateShowEnemies", 0)
+            setcv("nameplateShowFriends", 0)
+            setcv("nameplateShowAll", 0)
+
+            -- Zoom out to a full-body distance (the presentation uses a tight
+            -- showcase zoom that clips heads/feet for a portrait reference).
+            local savedZoom
+            if type(GetCameraZoom) == "function" then
+                savedZoom = GetCameraZoom()
+                local target = tonumber(AltTrackerConfig and AltTrackerConfig.refCaptureZoom) or 6.5
+                local delta = target - (savedZoom or 0)
+                if delta > 0.05 and type(CameraZoomOut) == "function" then pcall(CameraZoomOut, delta)
+                elseif delta < -0.05 and type(CameraZoomIn) == "function" then pcall(CameraZoomIn, -delta) end
+            end
+
+            frame:SetAlpha(0)   -- hide the window without triggering OnHide/Exit
+            C_Timer.After(1.3, function()   -- let the weapon draw + zoom + recenter settle
+                char.refshot_ts = time()
+                Screenshot()
+                C_Timer.After(0.7, function()
+                    frame:SetAlpha(1)
+                    if type(SetCVar) == "function" then
+                        for k, v in pairs(saved) do if v then pcall(SetCVar, k, v) end end
+                    end
+                    if savedZoom and type(GetCameraZoom) == "function" then
+                        local cur = GetCameraZoom()
+                        local d = savedZoom - cur
+                        if d > 0.05 and type(CameraZoomOut) == "function" then pcall(CameraZoomOut, d)
+                        elseif d < -0.05 and type(CameraZoomIn) == "function" then pcall(CameraZoomIn, -d) end
+                    end
+                    if wasSheathed and type(ToggleSheath) == "function" then pcall(ToggleSheath) end
+                    print("|cff88ff88AltTracker:|r reference captured. |cffffff00/reload|r to save it, then re-run the render pipeline.")
+                end)
+            end)
+        end
+
+        if haveSheath then
+            local function reach(n)
+                local ok, s = pcall(GetSheathState)
+                if (not ok) or s == targetState or n >= 4 then
+                    doCapture()
+                else
+                    pcall(ToggleSheath)
+                    C_Timer.After(0.45, function() reach(n + 1) end)
+                end
+            end
+            reach(0)
+        else
+            doCapture()
+        end
+    end
+
+    local refBtn = CreateFrame("Button", nil, titleBar, "BackdropTemplate")
+    refBtn:SetSize(18, 18)
+    refBtn:SetPoint("RIGHT", close, "LEFT", -6, 0)
+    refBtn:SetFrameLevel(titleBar:GetFrameLevel() + 5)
+    AltTracker.ApplyBackdrop(refBtn, 0.12, 0.12, 0.12, 1)
+    local refIcon = refBtn:CreateTexture(nil, "OVERLAY")
+    refIcon:SetPoint("CENTER")
+    refIcon:SetSize(13, 13)
+    refIcon:SetTexture("Interface\\ICONS\\INV_Misc_Spyglass_02")
+    refBtn:SetScript("OnClick", CaptureReferenceFromSheet)
+    refBtn:SetScript("OnEnter", function()
+        refBtn:SetBackdropColor(0.22, 0.22, 0.22, 1)
+        GameTooltip:SetOwner(refBtn, "ANCHOR_BOTTOMLEFT")
+        GameTooltip:AddLine("Update reference")
+        GameTooltip:AddLine("Take a clean screenshot of this character for its AI portrait. |cffffff00/reload|r afterward to save it.", 0.8, 0.8, 0.8, true)
+        GameTooltip:Show()
+    end)
+    refBtn:SetScript("OnLeave", function()
+        refBtn:SetBackdropColor(0.12, 0.12, 0.12, 1)
+        GameTooltip:Hide()
+    end)
+
     --------------------------------------------------------
     -- Left sidebar
     --------------------------------------------------------
