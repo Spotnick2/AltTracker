@@ -704,6 +704,35 @@ end
 local SYNC_WATCH_TIMEOUT = 45      -- seconds of silence before we report a stall
 local syncWatch = {}              -- [peerShort] = { name, deadline, sawData }
 
+-- Best-effort online check for a sync peer: true/false when we can find them in
+-- the guild roster or friends list, nil when we can't tell. Used to avoid the
+-- pointless "no sync response" warning for a peer that's simply offline — we
+-- auto-re-request when they come online (CHAT_MSG_SYSTEM), so silence is correct.
+local function IsPeerOnline(name)
+    if not name then return nil end
+    local short = PeerShort(name):lower()
+
+    if IsInGuild and IsInGuild() and GetNumGuildMembers and GetGuildRosterInfo then
+        for i = 1, (GetNumGuildMembers() or 0) do
+            local gname, _, _, _, _, _, _, _, online = GetGuildRosterInfo(i)
+            if gname and PeerShort(gname):lower() == short then
+                return online and true or false
+            end
+        end
+    end
+
+    if C_FriendList and C_FriendList.GetNumFriends and C_FriendList.GetFriendInfoByIndex then
+        for i = 1, (C_FriendList.GetNumFriends() or 0) do
+            local info = C_FriendList.GetFriendInfoByIndex(i)
+            if info and info.name and PeerShort(info.name):lower() == short then
+                return info.connected and true or false
+            end
+        end
+    end
+
+    return nil
+end
+
 local function CheckSyncWatch(short)
     local w = syncWatch[short]
     if not w then return end       -- cleared by CompleteStream => sync finished OK
@@ -712,7 +741,15 @@ local function CheckSyncWatch(short)
         if w.sawData then
             Print("|cffff8800Sync from " .. w.name .. " stalled|r — partial data, no completion. Try |cffffff00/alts sync " .. w.name .. "|r.")
         else
-            Print("|cff888888No sync response from " .. w.name .. "|r — they may be offline, still loading addons, or on an older version.")
+            local online = IsPeerOnline(w.name)
+            if online == false then
+                -- Confirmed offline: stay silent. We re-request automatically when
+                -- they come online (CHAT_MSG_SYSTEM peer-online handler).
+            elseif online == true then
+                Print("|cff888888No sync response from " .. w.name .. "|r — they're online but didn't reply (still loading addons, or on an older AltTracker).")
+            else
+                Print("|cff888888No sync response from " .. w.name .. "|r — they may be offline, still loading addons, or on an older version.")
+            end
         end
         syncWatch[short] = nil
     else
