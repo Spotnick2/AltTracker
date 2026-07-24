@@ -230,6 +230,8 @@ local function SerializeChar(c, sinceTS)
         if type(v) ~= "table"
         and not k:find("^gearlink_")   -- item links are local-only (too large for sync)
                                       -- gearid_* stays included (compact + sync-safe)
+        and not k:find("^gearsubtype_") -- local-only: only used by the local render pipeline;
+                                      -- synced alts fall back to keyword inference on gearname_
         and k ~= "specIcon"            -- numeric fileID, client-specific
         then
             parts[#parts+1] = k .. ":" .. tostring(v)
@@ -424,7 +426,7 @@ local function ClearSyncedStateFields(t)
         if k:find("^prof_") or k:find("^profmax_")
         or k:find("^gear_") or k:find("^gearq_")
         or k:find("^gearname_") or k:find("^gearid_")
-        or k:find("^gearlink_")
+        or k:find("^gearlink_") or k:find("^gearsubtype_")  -- both local-only (see note above)
         or k:find("^cd_") or k:find("^known_")   -- craft cooldowns (dynamic cd_<prof>@<label>) + legacy known_ flags
         or k:find("^si_") then                   -- saved raid lockouts (si_<name>@<diff>)
             t[k] = nil
@@ -1431,12 +1433,14 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
         local anyResolved = false
         for link, info in pairs(AltTracker.PendingGearLinks) do
-            local quality, ilvl = select(3, GetItemInfo(link))
+            local itemName, _, quality, ilvl, _, _, itemSubType = GetItemInfo(link)
             if ilvl then
                 local char = AltTrackerDB[info.guid]
                 if char then
                     char["gear_"..info.key]  = ilvl
                     char["gearq_"..info.key] = quality or 0
+                    if itemName and itemName ~= "" then char["gearname_"..info.key] = itemName end
+                    char["gearsubtype_"..info.key] = itemSubType or ""
                     anyResolved = true
                 end
                 AltTracker.PendingGearLinks[link] = nil

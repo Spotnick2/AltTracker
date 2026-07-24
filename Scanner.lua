@@ -247,6 +247,7 @@ local function ResetCharacter(char)
         char["gearq_"..slot.key]    = 0   -- item quality (5 = legendary)
         char["gearid_"..slot.key]   = 0   -- compact item id (safe to sync)
         char["gearname_"..slot.key] = ""   -- item name (for BiS matching)
+        char["gearsubtype_"..slot.key] = ""  -- item subtype ("Dagger", "Mail", ...) — authoritative gear type
         char["gearlink_"..slot.key] = ""   -- full item link (for tooltips)
     end
 
@@ -555,14 +556,15 @@ function AltTracker.ScanCharacter()
             local itemID = ItemIDFromLink(link)
             char["gearid_"..slot.key] = itemID
             char["gearlink_"..slot.key] = link
-            local itemName, _, quality, ilvl = GetItemInfo(link)
+            local itemName, _, quality, ilvl, _, _, itemSubType = GetItemInfo(link)
             if ilvl then
                 char["gear_"..slot.key]      = ilvl
                 char["gearq_"..slot.key]     = quality or 0
                 char["gearname_"..slot.key]  = itemName or ""
+                char["gearsubtype_"..slot.key] = itemSubType or ""
             else
                 -- Item link exists but item data isn't cached yet. Keep the
-                -- existing ilvl/quality/name values and retry on cache event.
+                -- existing ilvl/quality/name/subtype values and retry on cache event.
                 pendingLinks[link] = slot.key
             end
         else
@@ -570,6 +572,7 @@ function AltTracker.ScanCharacter()
             char["gearq_"..slot.key]     = 0
             char["gearid_"..slot.key]    = 0
             char["gearname_"..slot.key]  = ""
+            char["gearsubtype_"..slot.key] = ""
             char["gearlink_"..slot.key]  = ""
         end
     end
