@@ -233,6 +233,10 @@ local function SerializeChar(c, sinceTS)
         and not k:find("^gearsubtype_") -- local-only: only used by the local render pipeline;
                                       -- synced alts fall back to keyword inference on gearname_
         and k ~= "specIcon"            -- numeric fileID, client-specific
+        -- NOTE: refshot_ts (reference-screenshot marker) IS synced on purpose. The render
+        -- pipeline reads ONE aggregator account, so an alt's marker must ride sync to reach it.
+        -- The screenshot lives in the install-wide Screenshots folder, so any account on this
+        -- machine resolves it; cross-machine peers just won't match and fall back to the saved ref.
         then
             parts[#parts+1] = k .. ":" .. tostring(v)
         end
@@ -1672,6 +1676,67 @@ end
 -- Slash commands
 ------------------------------------------------------------
 
+------------------------------------------------------------
+-- Reference screenshot capture (feeds the AI render pipeline)
+--
+-- Hides the whole UI, takes an in-world Screenshot(), then restores the UI,
+-- and stamps an epoch marker (refshot_ts) on the player's record. The external
+-- render pipeline matches that marker to the resulting Screenshots/ file and
+-- uses it as a FRESH identity/gear reference — fixing the stale-reference
+-- problem where a months-old saved screenshot shows outdated transmog.
+--
+-- Screenshot() is asynchronous, so we sequence via C_Timer: hide UI -> let a
+-- frame render UI-less -> capture -> let the file write -> show UI.
+--
+-- v1 is manual (`/alts update-reference`): the player frames the camera (mouse-
+-- orbit to face the character) first. A portrait-UI button that auto-frames via
+-- the world-camera presentation is the intended follow-up.
+------------------------------------------------------------
+local function CaptureReferenceScreenshot()
+    if type(Screenshot) ~= "function" then
+        Print("|cffff8800Screenshot() is unavailable on this client.|r")
+        return
+    end
+    local guid = UnitGUID("player")
+    local char = guid and AltTrackerDB and AltTrackerDB[guid]
+    if not char then
+        Print("|cffff8800No character record yet|r — run |cffffff00/alts|r once so it scans, then retry.")
+        return
+    end
+
+    -- Draw weapons so they show in the reference (a caster's weapon in hand, a
+    -- hunter's bow, etc.). GetSheathState() == 1 means stowed; ToggleSheath()
+    -- draws them. Remember the original state and restore it afterward so we
+    -- don't leave the player's weapons changed.
+    local restoreSheath = false
+    if type(GetSheathState) == "function" and type(ToggleSheath) == "function" then
+        local ok, state = pcall(GetSheathState)
+        if ok and state == 1 then
+            pcall(ToggleSheath)   -- draw
+            restoreSheath = true
+        end
+    end
+
+    Print("Capturing reference screenshot — drawing weapons, hiding UI...")
+    -- Let the draw-weapon animation settle before hiding the UI and capturing.
+    C_Timer.After(0.6, function()
+        UIParent:Hide()
+        C_Timer.After(0.2, function()
+            char.refshot_ts = time()   -- marker the render pipeline matches against
+            Screenshot()
+            C_Timer.After(0.7, function()
+                UIParent:Show()
+                if restoreSheath and type(ToggleSheath) == "function" then
+                    pcall(ToggleSheath)   -- restore the stowed state
+                end
+                Print("|cff88ff88Reference captured|r (in your Screenshots folder). "
+                    .. "Run |cffffff00/reload|r to flush it to SavedVariables, then re-run the render pipeline.")
+            end)
+        end)
+    end)
+end
+AltTracker.CaptureReferenceScreenshot = CaptureReferenceScreenshot
+
 SLASH_ALTTRACKER1 = "/alts"
 SLASH_ALTTRACKER2 = "/alttracker"
 
@@ -1771,6 +1836,15 @@ SlashCmdList["ALTTRACKER"] = function(args)
         if AltTracker.OpenConfig then
             AltTracker.OpenConfig()
         end
+        return
+    end
+
+    ----------------------------------------------------
+    -- /alts update-reference  — capture a fresh render reference
+    ----------------------------------------------------
+
+    if cmd == "update-reference" or cmd == "updateref" then
+        CaptureReferenceScreenshot()
         return
     end
 
