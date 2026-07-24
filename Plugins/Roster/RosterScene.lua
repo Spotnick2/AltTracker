@@ -52,6 +52,8 @@ local SCENE_BACKDROPS = {
       file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\scene-zulaman.tga", w = 1024, h = 682, texh = 1024 },
     { id = "blacktemple", label = "Black Temple",
       file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\scene-blacktemple.tga", w = 1024, h = 682, texh = 1024 },
+    { id = "shattrath", label = "Shattrath",
+      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\scene-shattrath.tga", w = 1024, h = 682, texh = 1024 },
     { id = "plain",    label = "Plain (dark)", file = nil },
 }
 local curBackdrop = 1     -- index into SCENE_BACKDROPS
