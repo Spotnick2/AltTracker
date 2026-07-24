@@ -641,12 +641,26 @@ check(oversize == nil, "every wire message stays within the 255-byte addon-chann
 -- 31. Sync-watch: the user always gets closure after a request.
 ------------------------------------------------------------
 
--- 31a: a peer that never responds is reported after the timeout.
+-- 31a: an unanswered peer we CAN'T confirm online (not in guild/friends) stays
+-- silent — the common case for your own alts on another account. We auto-re-request
+-- when they come online, so a timeout for an unreachable peer is just noise.
 WoW.reset(); WoW.now = 1000
 T.WatchSyncPeer("Ghost-Realm")
 WoW.now = 1100                 -- advance past the 45s stall deadline
 WoW.flushTimers()
-check(chatHas("No sync response from Ghost-Realm"), "sync-watch: an unanswered peer is reported after the timeout")
+check(not chatHas("No sync response"), "sync-watch: an unreachable/unknown peer is NOT warned about")
+
+-- 31a2: an unanswered peer we CAN confirm online (in the guild roster, online) IS
+-- reported — worth flagging, since they should have replied.
+WoW.reset(); WoW.now = 1000
+IsInGuild          = function() return true end
+GetNumGuildMembers = function() return 1 end
+GetGuildRosterInfo = function(i) if i == 1 then return "Ghost-Realm", nil, nil, nil, nil, nil, nil, nil, true end end
+T.WatchSyncPeer("Ghost-Realm")
+WoW.now = 1100
+WoW.flushTimers()
+check(chatHas("No sync response from Ghost-Realm"), "sync-watch: an online peer that doesn't reply IS reported")
+IsInGuild, GetNumGuildMembers, GetGuildRosterInfo = nil, nil, nil
 
 -- 31b: a completed stream clears the watch, so no stall/no-response line fires.
 WoW.reset(); WoW.now = 1000

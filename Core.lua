@@ -741,14 +741,15 @@ local function CheckSyncWatch(short)
         if w.sawData then
             Print("|cffff8800Sync from " .. w.name .. " stalled|r — partial data, no completion. Try |cffffff00/alts sync " .. w.name .. "|r.")
         else
-            local online = IsPeerOnline(w.name)
-            if online == false then
-                -- Confirmed offline: stay silent. We re-request automatically when
-                -- they come online (CHAT_MSG_SYSTEM peer-online handler).
-            elseif online == true then
+            -- Only warn when the peer is CONFIRMED online (worth flagging: still
+            -- loading, or an older AltTracker that isn't answering). If they're
+            -- confirmed offline, OR we can't tell — which is the norm for your own
+            -- alts on another account, since they aren't in your guild/friends list
+            -- — stay silent. We re-request automatically when they come online
+            -- (CHAT_MSG_SYSTEM peer-online handler), so a timeout for an unreachable
+            -- peer is just noise.
+            if IsPeerOnline(w.name) == true then
                 Print("|cff888888No sync response from " .. w.name .. "|r — they're online but didn't reply (still loading addons, or on an older AltTracker).")
-            else
-                Print("|cff888888No sync response from " .. w.name .. "|r — they may be offline, still loading addons, or on an older version.")
             end
         end
         syncWatch[short] = nil
