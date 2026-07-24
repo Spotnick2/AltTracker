@@ -576,6 +576,8 @@ do
     end
 
     function AltTrackerCameraPresentation:Exit(reason)
+        -- Ignore the transient OnHide fired by the capture's UIParent:Hide().
+        if self.capturing then return end
         if not self.active or self.mode == "exit" then
             return
         end
@@ -649,6 +651,22 @@ do
         local sheet = self.sheetFrame
         if not sheet or not UIParent or not UIParent.GetChildren then return end
         if InCombatLockdown and InCombatLockdown() then return end
+
+        -- Close any open chat edit box first. If we were opened by typing "/alts"
+        -- in chat, its edit box is still mid-input; hiding the chat frame in that
+        -- state and restoring it later resurrects a half-focused, un-closable
+        -- /say box. Deactivating it now means restore brings nothing back.
+        for i = 1, (NUM_CHAT_WINDOWS or 10) do
+            local eb = _G["ChatFrame" .. i .. "EditBox"]
+            if eb and eb.IsShown and eb:IsShown() then
+                if type(ChatEdit_DeactivateChat) == "function" then
+                    pcall(ChatEdit_DeactivateChat, eb)
+                else
+                    if eb.ClearFocus then pcall(eb.ClearFocus, eb) end
+                    if eb.Hide then pcall(eb.Hide, eb) end
+                end
+            end
+        end
 
         -- Hide the game UI by hiding UIParent's direct children EXCEPT our sheet,
         -- rather than hiding/reparenting UIParent itself. The sheet stays under
@@ -1664,6 +1682,9 @@ local function CreateFrameIfNeeded()
     frame:SetMovable(true); frame:EnableMouse(false)  -- drag handled by titleBar
     tinsert(UISpecialFrames,"AltTrackerSheet")
     frame:SetScript("OnShow", function()
+        -- The capture's UIParent:Show() re-fires this OnShow; skip re-entering the
+        -- presentation / replaying the open animation during a capture.
+        if AltTrackerCameraPresentation and AltTrackerCameraPresentation.capturing then return end
         -- Camera presentation runs first so the frame-shift it performs
         -- happens before the open-animation alpha fade — otherwise the
         -- frame would fade in at its old position and jump.
@@ -1797,23 +1818,35 @@ local function CreateFrameIfNeeded()
                 end
             end
 
-            frame:SetAlpha(0)   -- hide the window without triggering OnHide/Exit
+            frame:SetAlpha(0)
             C_Timer.After(1.3, function()   -- let the weapon draw + zoom + recenter settle
-                char.refshot_ts = time()
-                Screenshot()
-                C_Timer.After(0.7, function()
-                    frame:SetAlpha(1)
-                    if type(SetCVar) == "function" then
-                        for k, v in pairs(saved) do if v then pcall(SetCVar, k, v) end end
-                    end
-                    if savedZoom and type(GetCameraZoom) == "function" then
-                        local cur = GetCameraZoom()
-                        local d = savedZoom - cur
-                        if d > 0.05 and type(CameraZoomOut) == "function" then pcall(CameraZoomOut, d)
-                        elseif d < -0.05 and type(CameraZoomIn) == "function" then pcall(CameraZoomIn, -d) end
-                    end
-                    if wasSheathed and type(ToggleSheath) == "function" then pcall(ToggleSheath) end
-                    print("|cff88ff88AltTracker:|r reference captured. |cffffff00/reload|r to save it, then re-run the render pipeline.")
+                -- Full UI blackout for the shot itself. UIParent:Hide() hides ALL
+                -- UI, including driver-controlled addon frames (unit frames, DPS
+                -- meters) that the presentation's per-frame hide can't suppress, so
+                -- the reference is spotless. `capturing` stops the sheet's OnHide
+                -- (fired by hiding UIParent) from tearing the showcase down via Exit,
+                -- and stops OnShow from re-running Enter when we bring UIParent back.
+                AltTrackerCameraPresentation.capturing = true
+                if UIParent and UIParent.Hide then UIParent:Hide() end
+                C_Timer.After(0.1, function()
+                    char.refshot_ts = time()
+                    Screenshot()
+                    C_Timer.After(0.5, function()
+                        if UIParent and UIParent.Show then UIParent:Show() end
+                        AltTrackerCameraPresentation.capturing = false
+                        frame:SetAlpha(1)
+                        if type(SetCVar) == "function" then
+                            for k, v in pairs(saved) do if v then pcall(SetCVar, k, v) end end
+                        end
+                        if savedZoom and type(GetCameraZoom) == "function" then
+                            local cur = GetCameraZoom()
+                            local d = savedZoom - cur
+                            if d > 0.05 and type(CameraZoomOut) == "function" then pcall(CameraZoomOut, d)
+                            elseif d < -0.05 and type(CameraZoomIn) == "function" then pcall(CameraZoomIn, -d) end
+                        end
+                        if wasSheathed and type(ToggleSheath) == "function" then pcall(ToggleSheath) end
+                        print("|cff88ff88AltTracker:|r reference captured. |cffffff00/reload|r to save it, then re-run the render pipeline.")
+                    end)
                 end)
             end)
         end
