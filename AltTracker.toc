@@ -10,6 +10,7 @@ Libs\LibDeflate\LibDeflate.lua
 Libs\ChatThrottleLib\ChatThrottleLib.lua
 Theme.lua
 AltTrackerRenderManifest.lua
+AltTrackerSceneManifest.lua
 Core.lua
 Scanner.lua
 Reputations.lua

@@ -3447,6 +3447,12 @@ local function BuildPanel(mainFrame)
                 local c = candidates and candidates[1]
                 if c and c.path then return c.path, c.sourceWidth, c.sourceHeight end
             end,
+            resolveCutout = function(char)
+                if type(AltTrackerSceneManifest) ~= "table" then return nil end
+                local entry = AltTrackerSceneManifest[BuildManifestLookupKey(char)]
+                if not entry or not entry.image then return nil end
+                return NormalizeManifestImagePath(entry.image), tonumber(entry.width), tonumber(entry.height)
+            end,
             classIconPath = ClassIconPath,
             classDisplay  = function(token) return CLASS_DISPLAY[(token or ""):upper()] end,
             raceDisplay   = function(char) return char and (RACE_DISPLAY[char.race or ""] or char.race) or nil end,
