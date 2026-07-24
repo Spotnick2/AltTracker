@@ -768,7 +768,8 @@ local function BootstrapPlugin(isOnDemand)
     AltTracker.RegisterPlugin({
         id            = ADDON_ID,
         label         = "Warband",
-        icon          = "Interface\\Icons\\INV_Misc_Bag_08",
+        icon          = (AltTracker.MEDIA_PATH or "Interface\\AddOns\\AltTracker\\Media\\")
+                        .. "Icons\\warband.tga",
         _isPlugin     = true,
         OnActivate    = function(mf) AT_WB.Activate(mf) end,
         OnDeactivate  = function(mf) AT_WB.Deactivate(mf) end,
