@@ -328,7 +328,8 @@ local CLASS_LABEL = {
 }
 local GROUP_ORDER = { 7, 0, 3, 2, 4, 9, 5, 6, 11, 1, 12, 13, 15 }
 
-local panel, scroll, content, titleFS, emptyFS, searchBox
+local panel, titleFS, emptyFS, searchBox
+AT_WB.scrollRow = 0
 
 local function fmtCount(n)
     if n >= 1000 then return string.format("%.1fk", n / 1000) end
@@ -418,10 +419,16 @@ local function hideFrom(pool, from)
     for k = from, #pool do if pool[k] then pool[k]:Hide() end end
 end
 
+-- Cells and headers are DIRECT children of the panel (like the Raids plugin) —
+-- not buried in a ScrollFrame, which was swallowing the hover events. Scrolling
+-- is virtual: we lay out only the visible window of rows and shift it on the
+-- mouse wheel.
+local ROW_TOP = TITLE_H + 12   -- first row Y (below the title/search strip)
+
 local function getHeader(i)
     local fs = AT_WB.headers[i]
     if not fs then
-        fs = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        fs = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         fs:SetJustifyH("LEFT")
         fs:SetTextColor(unpack((AltTracker.C and AltTracker.C.TEXT_BRIGHT) or { 1, 1, 1 }))
         AT_WB.headers[i] = fs
@@ -432,13 +439,9 @@ end
 local function getCell(i)
     local cell = AT_WB.cells[i]
     if not cell then
-        cell = CreateFrame("Button", nil, content, "BackdropTemplate")
+        cell = CreateFrame("Button", nil, panel, "BackdropTemplate")
         cell:SetSize(ICON, ICON)
         cell:EnableMouse(true)
-        -- Sit above the scroll child + any panel overlays so hover reliably
-        -- reaches the cell (mirrors the Roster gear buttons' frame-level bump).
-        cell:SetFrameStrata(content:GetFrameStrata() or "MEDIUM")
-        cell:SetFrameLevel((content:GetFrameLevel() or 1) + 10)
         cell:SetBackdrop({ edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 })
         cell.icon = cell:CreateTexture(nil, "ARTWORK")
         cell.icon:SetPoint("TOPLEFT", 1, -1)
@@ -510,59 +513,91 @@ local function ApplySearchDim()
 end
 AT_WB.ApplySearchDim = ApplySearchDim
 
+-- Lay out only the visible window of rows (headers + wrapped item rows) as
+-- direct panel children, offset by AT_WB.scrollRow.
+function AT_WB.Layout()
+    if not panel or not panel:IsShown() then return end
+    local rows = AT_WB._rows or {}
+    if #rows == 0 then
+        hideFrom(AT_WB.cells, 1)
+        hideFrom(AT_WB.headers, 1)
+        return
+    end
+
+    local ph = panel:GetHeight()
+    if not ph or ph < 50 then ph = 400 end
+    local visible = math.max(1, math.floor((ph - ROW_TOP - PAD) / STRIDE))
+    local maxStart = math.max(0, #rows - visible)
+    local start = math.max(0, math.min(AT_WB.scrollRow or 0, maxStart))
+    AT_WB.scrollRow = start
+
+    local ci, hi = 0, 0
+    for slot = 0, visible - 1 do
+        local row = rows[start + slot + 1]
+        if not row then break end
+        local y = ROW_TOP + slot * STRIDE
+        if row.header then
+            hi = hi + 1
+            local hdr = getHeader(hi)
+            hdr:ClearAllPoints()
+            hdr:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD, -(y + 4))
+            hdr:SetText(row.header .. "  |cff888888(" .. row.count .. ")|r")
+            hdr:Show()
+        else
+            local col = 0
+            for _, e in ipairs(row.items) do
+                ci = ci + 1
+                local cell = getCell(ci)
+                cell:ClearAllPoints()
+                cell:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD + col * STRIDE, -y)
+                cell.icon:SetTexture(e.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
+                cell.count:SetText(e.total > 1 and fmtCount(e.total) or "")
+                local qc = e.quality and ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[e.quality]
+                if qc then cell:SetBackdropBorderColor(qc.r, qc.g, qc.b, 1)
+                else cell:SetBackdropBorderColor(0.3, 0.3, 0.3, 1) end
+                cell.entry = e
+                cell.itemName = e.name
+                cell:Show()
+                col = col + 1
+            end
+        end
+    end
+    hideFrom(AT_WB.cells, ci + 1)
+    hideFrom(AT_WB.headers, hi + 1)
+    ApplySearchDim()
+end
+
+-- Recompute the flat row model from current data, then lay out.
 function AT_WB.Refresh()
     if not panel or not panel:IsShown() then return end
     local agg = gather()
     if not next(agg) then
+        AT_WB._rows = {}
         hideFrom(AT_WB.cells, 1)
         hideFrom(AT_WB.headers, 1)
         emptyFS:Show()
-        content:SetHeight(1)
         return
     end
     emptyFS:Hide()
 
     local groups = buildBuckets(agg)
-    local width = scroll:GetWidth()
-    if not width or width < 100 then width = 400 end
-    local cols = math.max(1, math.floor((width - PAD) / STRIDE))
+    local width = panel:GetWidth()
+    if not width or width < 100 then width = 500 end
+    local cols = math.max(1, math.floor((width - 2 * PAD) / STRIDE))
 
-    local ci, hi, y = 0, 0, 0
+    -- Flatten into uniform-height visual rows: one header row per group, then
+    -- item rows of up to `cols` cells each.
+    local rows = {}
     for _, g in ipairs(groups) do
-        hi = hi + 1
-        local hdr = getHeader(hi)
-        hdr:ClearAllPoints()
-        hdr:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
-        hdr:SetText(g.label .. "  |cff888888(" .. #g.items .. ")|r")
-        hdr:Show()
-        y = y + HDR_H
-
-        local col = 0
-        for _, e in ipairs(g.items) do
-            ci = ci + 1
-            local cell = getCell(ci)
-            cell:ClearAllPoints()
-            cell:SetPoint("TOPLEFT", content, "TOPLEFT", col * STRIDE, -y)
-            cell.icon:SetTexture(e.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
-            cell.count:SetText(e.total > 1 and fmtCount(e.total) or "")
-            local qc = e.quality and ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[e.quality]
-            if qc then cell:SetBackdropBorderColor(qc.r, qc.g, qc.b, 1)
-            else cell:SetBackdropBorderColor(0.3, 0.3, 0.3, 1) end
-            cell.entry = e
-            cell.itemName = e.name
-            cell:Show()
-            col = col + 1
-            if col >= cols then col = 0; y = y + STRIDE end
+        rows[#rows + 1] = { header = g.label, count = #g.items }
+        for i = 1, #g.items, cols do
+            local its = {}
+            for j = i, math.min(i + cols - 1, #g.items) do its[#its + 1] = g.items[j] end
+            rows[#rows + 1] = { items = its }
         end
-        if col > 0 then y = y + STRIDE end
-        y = y + GROUP_GAP
     end
-
-    hideFrom(AT_WB.cells, ci + 1)
-    hideFrom(AT_WB.headers, hi + 1)
-    content:SetWidth(width)
-    content:SetHeight(math.max(y, 1))
-    ApplySearchDim()
+    AT_WB._rows = rows
+    AT_WB.Layout()
 end
 
 ------------------------------------------------------------
@@ -594,12 +629,13 @@ local function BuildPanel(mainFrame)
         ApplySearchDim()
     end)
 
-    scroll = CreateFrame("ScrollFrame", nil, panel, "UIPanelScrollFrameTemplate")
-    scroll:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD, -(TITLE_H + 8))
-    scroll:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -28, PAD)
-    content = CreateFrame("Frame", nil, scroll)
-    content:SetSize(1, 1)
-    scroll:SetScrollChild(content)
+    -- Virtual scroll: the wheel shifts which rows are laid out (cells are direct
+    -- panel children, so hover works — a real ScrollFrame ate the mouse events).
+    panel:EnableMouseWheel(true)
+    panel:SetScript("OnMouseWheel", function(_, delta)
+        AT_WB.scrollRow = math.max(0, (AT_WB.scrollRow or 0) - delta * 2)
+        AT_WB.Layout()
+    end)
 
     emptyFS = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     emptyFS:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD, -(TITLE_H + 12))
