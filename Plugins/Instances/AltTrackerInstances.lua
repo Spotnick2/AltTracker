@@ -2,34 +2,183 @@
 -- AltTrackerInstances — cross-alt raid-lockout matrix (P2).
 --
 -- Pure display. The lockout data is captured + synced by AltTracker core
--- (Core.lua ScanSavedInstances) into flat cd-style fields on each character
--- record: si_<name>@<difficulty> = "expiresAt|progress|total|maxPlayers|diffName".
--- This plugin reads those fields and lays them out SavedInstances-style:
---   rows = raids (the union across all alts that have a lockout),
---   cols = characters (only those with at least one lockout),
---   cell = boss progress "X/Y", coloured by how soon it resets; hover = detail.
+-- (Core.lua ScanSavedInstances) into flat fields on each character record:
+--   si_<name>@<diff>      = "expiresAt|progress|total|maxPlayers|diffName"
+--   si_boss_<name>@<diff> = "<killmask>"  (bit e-1 set = encounter e dead)
+--
+-- Laid out SavedInstances-style, grouped DBM-style:
+--   rows   = raids under collapsible expansion headers (Burning Crusade first,
+--            then Classic); collapse state persists per logged-in character. A
+--            raid nobody is saved to still shows, with a dash per alt. A landmark
+--            thumbnail sits in the name cell; the rest of the row is a plain band.
+--   cols   = characters level 60+ (fillers), ranked by level then item level,
+--            plus anyone who actually holds a lockout.
+--   cell   = boss progress "X/Y", coloured by how soon it resets,
+--   hover  = the raid's boss roster (Killed/Not-killed when known), or on the
+--            reset cell, the time remaining until reset.
 --
 -- LoadOnDemand: registers on PLAYER_LOGIN, or immediately if enabled mid-session.
 ------------------------------------------------------------
 
 local ADDON_ID = "AltTrackerInstances"
-local AT_SI = { headers = {}, rowLabels = {}, cells = {}, seps = {} }
+local AT_SI = {
+    headers = {}, rowLabels = {}, resetCells = {}, cells = {}, bands = {},
+    vlines = {}, cvlines = {}, hlines = {}, groups = {},
+}
 
-local NAME_COL_W = 168   -- left column: raid name
-local COL_W      = 52    -- per-character column
-local HEADER_H   = 24
-local ROW_H      = 20
-local PAD_X      = 12
-local PAD_Y      = 10
-local TITLE_H    = 22
-local MAX_COLS   = 24
-local MAX_ROWS   = 16
+local NAME_COL_W  = 190   -- left (frozen) column: landmark thumbnail + raid name
+local RESET_COL_W = 92     -- (frozen) reset day/time column
+local COL_W       = 58     -- per-character column
+local HEADER_H    = 24
+local ROW_H       = 40     -- raid row
+local GROUP_H     = 26     -- expansion header row
+local ROW_GAP     = 1
+local PAD_X       = 12
+local PAD_Y       = 10
+local TITLE_H     = 22
+local STATS_H     = 30
+local HBAR_H      = 14     -- horizontal scrollbar strip
+local MAX_COLS    = 40
+local MAX_VIEW_COLS = 12   -- character columns visible at once before scrolling
+local COL_LEVEL_MIN = 60   -- a character is a "filler" column at this level+
+local MAX_FRAME_H = 880    -- don't grow the window past this; collapse to manage
 
-local panel, titleFS, emptyFS
+-- Frozen widgets live on `panel`; the character columns (headers, cells, their
+-- vertical grid lines) live on `colChild` inside the horizontally-scrolling
+-- `colScroll`, so Raid + Reset stay put while many alts scroll.
+local panel, colScroll, colChild, hbar
+local titleFS, emptyFS, raidHdr, resetHdr, headerBG, headerSep, statsBar, statsFS
+
+-- Thumbnail cover-crop. The TGA is 1024x512 with the (aspect-preserved) image in
+-- the top 341 rows and black padding below (see Media/Raids/README.md).
+local BAND_IMG_W  = 1024
+local BAND_IMG_H  = 341
+local BAND_TEX_H  = 512
+local BAND_CASP   = BAND_IMG_W / BAND_IMG_H      -- content aspect (~3:1)
+local BAND_VSCALE = BAND_IMG_H / BAND_TEX_H
 
 local function Print(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[AltTracker Raids]|r " .. msg)
 end
+
+------------------------------------------------------------
+-- Canonical raid catalogue
+--
+-- Order = table order = progression order (drives row order within a group).
+-- `match` lists the lower-cased phrase(s) a live lockout name must contain to
+-- bind to this row (GetSavedInstanceInfo prefixes some, e.g. "Coilfang:
+-- Serpentshrine Cavern"). `bosses` is in the API's encounterIndex order — bit
+-- e-1 of the killmask maps to bosses[e]. VERIFY the order in game before trusting
+-- a raid's named tooltip (Karazhan is the stress case). Until verified a wrong
+-- order only mislabels the Killed/Not-killed split; the aggregate X/Y is right.
+------------------------------------------------------------
+local RAIDS = {
+    -- ===== Burning Crusade =====
+    { apiName = "Karazhan", display = "Karazhan", expansion = "bc", art = "kara", reset = "Weekly",
+      bosses = { "Attumen the Huntsman", "Moroes", "Maiden of Virtue", "Opera Event",
+                 "The Curator", "Terestian Illhoof", "Shade of Aran", "Netherspite",
+                 "Chess Event", "Prince Malchezaar", "Nightbane" } },
+    { apiName = "Gruul's Lair", display = "Gruul's Lair", expansion = "bc", art = "gruul", reset = "Weekly",
+      bosses = { "High King Maulgar", "Gruul the Dragonkiller" } },
+    { apiName = "Magtheridon's Lair", display = "Magtheridon's Lair", expansion = "bc", art = "mag", reset = "Weekly",
+      bosses = { "Magtheridon" } },
+    { apiName = "Serpentshrine Cavern", display = "Serpentshrine Cavern", expansion = "bc", art = "ssc", reset = "Weekly",
+      bosses = { "Hydross the Unstable", "The Lurker Below", "Leotheras the Blind",
+                 "Fathom-Lord Karathress", "Morogrim Tidewalker", "Lady Vashj" } },
+    { apiName = "Tempest Keep", aliases = { "The Eye" }, display = "Tempest Keep", expansion = "bc", art = "tk", reset = "Weekly",
+      bosses = { "Al'ar", "Void Reaver", "High Astromancer Solarian", "Kael'thas Sunstrider" } },
+    { apiName = "Hyjal Summit", aliases = { "Mount Hyjal", "Battle for Mount Hyjal" },
+      display = "Battle for Mount Hyjal", expansion = "bc", art = "hyjal", reset = "Weekly",
+      bosses = { "Rage Winterchill", "Anetheron", "Kaz'rogal", "Azgalor", "Archimonde" } },
+    { apiName = "Black Temple", display = "Black Temple", expansion = "bc", art = "bt", reset = "Weekly",
+      bosses = { "High Warlord Naj'entus", "Supremus", "Shade of Akama", "Teron Gorefiend",
+                 "Gurtogg Bloodboil", "Reliquary of Souls", "Mother Shahraz",
+                 "Illidari Council", "Illidan Stormrage" } },
+    { apiName = "Zul'Aman", display = "Zul'Aman", expansion = "bc", art = "za", reset = "3-day",
+      bosses = { "Akil'zon", "Nalorakk", "Jan'alai", "Halazzi", "Hex Lord Malacrass", "Zul'jin" } },
+    { apiName = "Sunwell Plateau", display = "Sunwell Plateau", expansion = "bc", art = "sunwell", reset = "Weekly",
+      bosses = { "Kalecgos", "Brutallus", "Felmyst", "Eredar Twins", "M'uru", "Kil'jaeden" } },
+
+    -- ===== Classic (Vanilla) =====
+    { apiName = "Molten Core", display = "Molten Core", expansion = "vanilla", art = "mc", reset = "Weekly",
+      bosses = { "Lucifron", "Magmadar", "Gehennas", "Garr", "Baron Geddon", "Shazzrah",
+                 "Sulfuron Harbinger", "Golemagg the Incinerator", "Majordomo Executus", "Ragnaros" } },
+    { apiName = "Onyxia's Lair", display = "Onyxia's Lair", expansion = "vanilla", art = "ony", reset = "5-day",
+      bosses = { "Onyxia" } },
+    { apiName = "Blackwing Lair", display = "Blackwing Lair", expansion = "vanilla", art = "bwl", reset = "Weekly",
+      bosses = { "Razorgore the Untamed", "Vaelastrasz the Corrupt", "Broodlord Lashlayer",
+                 "Firemaw", "Ebonroc", "Flamegor", "Chromaggus", "Nefarian" } },
+    { apiName = "Zul'Gurub", display = "Zul'Gurub", expansion = "vanilla", art = "zg", reset = "3-day",
+      bosses = { "High Priest Venoxis", "High Priestess Jeklik", "High Priestess Mar'li",
+                 "High Priest Thekal", "High Priestess Arlokk", "Bloodlord Mandokir",
+                 "Jin'do the Hexxer", "Hakkar" } },
+    { apiName = "Ruins of Ahn'Qiraj", display = "Ruins of Ahn'Qiraj", expansion = "vanilla", art = "aq20", reset = "3-day",
+      bosses = { "Kurinnaxx", "General Rajaxx", "Moam", "Buru the Gorger",
+                 "Ayamiss the Hunter", "Ossirian the Unscarred" } },
+    { apiName = "Temple of Ahn'Qiraj", aliases = { "Ahn'Qiraj Temple" }, display = "Temple of Ahn'Qiraj", expansion = "vanilla", art = "aq40", reset = "Weekly",
+      bosses = { "The Prophet Skeram", "Silithid Royalty", "Battleguard Sartura",
+                 "Fankriss the Unyielding", "Viscidus", "Princess Huhuran",
+                 "Twin Emperors", "Ouro", "C'Thun" } },
+    { apiName = "Naxxramas", display = "Naxxramas", expansion = "vanilla", art = "naxx", reset = "Weekly",
+      bosses = { "Anub'Rekhan", "Grand Widow Faerlina", "Maexxna", "Noth the Plaguebringer",
+                 "Heigan the Unclean", "Loatheb", "Instructor Razuvious", "Gothik the Harvester",
+                 "The Four Horsemen", "Patchwerk", "Grobbulus", "Gluth", "Thaddius",
+                 "Sapphiron", "Kel'Thuzad" } },
+}
+
+-- Expansion groups, latest first (Burning Crusade on top, then Classic).
+local GROUPS = {
+    { key = "bc",      label = "Burning Crusade" },
+    { key = "vanilla", label = "Classic" },
+}
+-- First-run collapse defaults: newest expanded, older collapsed (compact start).
+local DEFAULT_COLLAPSED = { vanilla = true }
+
+-- Build each raid's lower-cased match phrases (apiName + aliases).
+for _, r in ipairs(RAIDS) do
+    r.match = { r.apiName:lower() }
+    if r.aliases then for _, a in ipairs(r.aliases) do r.match[#r.match + 1] = a:lower() end end
+end
+
+-- Resolve a live lockout name to its canonical raid by substring-contains, so a
+-- prefixed name ("Coilfang: Serpentshrine Cavern") still binds.
+local function matchRaid(nameLower)
+    for _, r in ipairs(RAIDS) do
+        for _, ph in ipairs(r.match) do
+            if nameLower == ph or nameLower:find(ph, 1, true) then return r end
+        end
+    end
+    return nil
+end
+
+------------------------------------------------------------
+-- Per-character collapse state (persisted in AltTrackerConfig, keyed by GUID)
+------------------------------------------------------------
+local function collapseStore()
+    AltTrackerConfig = AltTrackerConfig or {}
+    AltTrackerConfig.instancesCollapse = AltTrackerConfig.instancesCollapse or {}
+    local key = (UnitGUID and UnitGUID("player")) or "default"
+    AltTrackerConfig.instancesCollapse[key] = AltTrackerConfig.instancesCollapse[key] or {}
+    return AltTrackerConfig.instancesCollapse[key]
+end
+
+local function isCollapsed(groupKey)
+    local s = collapseStore()
+    if s[groupKey] == nil then return DEFAULT_COLLAPSED[groupKey] == true end
+    return s[groupKey] == true
+end
+
+local function toggleCollapse(groupKey)
+    local s = collapseStore()
+    local cur = s[groupKey]
+    if cur == nil then cur = DEFAULT_COLLAPSED[groupKey] == true end
+    s[groupKey] = not cur
+    AT_SI.Refresh()
+end
+
+------------------------------------------------------------
+-- Formatting helpers
+------------------------------------------------------------
 
 -- "in 2d 4h" style, from a seconds-remaining value.
 local function fmtDur(sec)
@@ -43,6 +192,11 @@ local function fmtDur(sec)
     return m .. "m"
 end
 
+-- Reset moment -> "Tue 11:00" (the weekday/time the lockout frees up).
+local function resetLabel(ts)
+    return date("%a %H:%M", ts)
+end
+
 -- Colour a cell by how soon the lockout resets (planning cue).
 local function resetColor(remaining)
     if remaining < 12 * 3600 then return 1.00, 0.42, 0.34   -- <12h — going soon
@@ -50,7 +204,21 @@ local function resetColor(remaining)
     else return 0.52, 0.90, 0.52 end                          -- plenty of time
 end
 
+-- Decode a positional killmask into a boolean-per-boss array of length n.
+-- Lua 5.1 has no bitops; powers of two and integer sums are exact well beyond
+-- our ~15-boss max, so float arithmetic here is safe.
+local function decodeMask(mask, n)
+    local out = {}
+    mask = tonumber(mask) or 0
+    for i = 1, n do
+        out[i] = (math.floor(mask / (2 ^ (i - 1))) % 2) >= 1
+    end
+    return out
+end
+
 -- Parse "si_<name>@<diff>" + "expiresAt|prog|total|size|diffName".
+-- A si_boss_ mask value ("5", no pipes) is rejected here — that's what keeps old
+-- clients from rendering it as a bogus raid row.
 local function parseLockout(key, val)
     local name, diff = key:match("^si_(.+)@(%d+)$")
     if not name then return nil end
@@ -68,48 +236,114 @@ local function parseLockout(key, val)
     }
 end
 
--- Collect the characters (with any lockout) and the union of raids.
+------------------------------------------------------------
+-- Read model
+------------------------------------------------------------
+
+-- All tracked characters (with level/ilvl for ranking) + per-char lockouts keyed
+-- by canonical raid apiName (lower) when recognised, else raw name; `lk.canon`
+-- points at the canonical raid (nil = unknown -> Other). Killmask attached as .mask.
 local function gather()
-    local chars, raidOrder, raidSeen, lookup = {}, {}, {}, {}
+    local allChars, lookup = {}, {}
     AltTrackerDB = AltTrackerDB or {}
     for guid, c in pairs(AltTrackerDB) do
         if type(c) == "table" and c.name then
-            local mine = nil
+            local mine, masks
             for k, v in pairs(c) do
-                if type(k) == "string" and type(v) == "string" and k:find("^si_") then
-                    local lk = parseLockout(k, v)
-                    if lk then
-                        mine = mine or {}
-                        mine[lk.raidKey] = lk
-                        if not raidSeen[lk.raidKey] then
-                            raidSeen[lk.raidKey] = lk
-                            raidOrder[#raidOrder + 1] = lk
+                if type(k) == "string" then
+                    if k:find("^si_boss_") then
+                        local rest = k:match("^si_boss_(.+)$")   -- "<name>@<diff>"
+                        if rest then masks = masks or {}; masks[rest] = tonumber(v) end
+                    elseif type(v) == "string" and k:find("^si_") then
+                        local lk = parseLockout(k, v)
+                        if lk then
+                            mine = mine or {}
+                            lk.canon = matchRaid(lk.name:lower())
+                            local key = lk.canon and lk.canon.apiName:lower() or lk.name:lower()
+                            mine[key] = lk
                         end
                     end
                 end
             end
             if mine then
-                chars[#chars + 1] = { guid = guid, name = c.name, class = c.class }
+                if masks then
+                    for _, lk in pairs(mine) do
+                        local m = masks[lk.name .. "@" .. tostring(lk.diff)]
+                        if m ~= nil then lk.mask = m end
+                    end
+                end
                 lookup[guid] = mine
+            end
+            allChars[#allChars + 1] = {
+                guid = guid, name = c.name, class = c.class,
+                level = tonumber(c.level) or 0, ilvl = tonumber(c.ilvl) or 0,
+            }
+        end
+    end
+    return allChars, lookup
+end
+
+local function findLockout(mine, raid)
+    return mine and mine[raid.apiName:lower()] or nil
+end
+
+-- Columns: every character level 60+ (filler), plus anyone holding any lockout so
+-- a real save is never hidden. Ranked by level, then item level, then name.
+local function columnsForView(allChars, lookup)
+    local cols = {}
+    for _, ch in ipairs(allChars) do
+        if (ch.level or 0) >= COL_LEVEL_MIN or lookup[ch.guid] then
+            cols[#cols + 1] = ch
+        end
+    end
+    table.sort(cols, function(a, b)
+        if (a.level or 0) ~= (b.level or 0) then return (a.level or 0) > (b.level or 0) end
+        if (a.ilvl or 0)  ~= (b.ilvl or 0)  then return (a.ilvl or 0)  > (b.ilvl or 0)  end
+        return (a.name or "") < (b.name or "")
+    end)
+    return cols
+end
+
+-- Flatten the catalogue into display rows: an expansion header per group, its
+-- raid rows when expanded, then an "Other" group for any unrecognised lockout.
+local function buildDisplayRows(lookup)
+    local out = {}
+    for _, g in ipairs(GROUPS) do
+        out[#out + 1] = { isGroup = true, key = g.key, label = g.label }
+        if not isCollapsed(g.key) then
+            for _, r in ipairs(RAIDS) do
+                if r.expansion == g.key then out[#out + 1] = { raid = r } end
             end
         end
     end
-    table.sort(chars, function(a, b) return (a.name or "") < (b.name or "") end)
-    table.sort(raidOrder, function(a, b)
-        if a.name ~= b.name then return a.name < b.name end
-        return a.diff < b.diff
-    end)
-    return chars, raidOrder, lookup
+    local otherRows, seen = {}, {}
+    for _, mine in pairs(lookup) do
+        for key, lk in pairs(mine) do
+            if not lk.canon and not seen[key] then
+                seen[key] = true
+                otherRows[#otherRows + 1] = { apiName = lk.name, display = lk.name,
+                                              isOther = true, match = {}, bosses = {} }
+            end
+        end
+    end
+    if #otherRows > 0 then
+        out[#out + 1] = { isGroup = true, key = "other", label = "Other" }
+        if not isCollapsed("other") then
+            for _, r in ipairs(otherRows) do out[#out + 1] = { raid = r } end
+        end
+    end
+    return out
 end
 
 ------------------------------------------------------------
 -- Widget pools (created lazily, parented to the panel)
 ------------------------------------------------------------
 
+-- Character-column widgets live on colChild (they scroll horizontally).
 local function getHeader(i)
     local fs = AT_SI.headers[i]
     if not fs then
-        fs = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        fs = colChild:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         fs:SetJustifyH("CENTER")
         fs:SetWidth(COL_W)
         AT_SI.headers[i] = fs
@@ -117,15 +351,139 @@ local function getHeader(i)
     return fs
 end
 
+local function getCVLine(i)
+    local t = AT_SI.cvlines[i]
+    if not t then
+        t = colChild:CreateTexture(nil, "ARTWORK")
+        t:SetColorTexture(0, 0, 0, 0.40)
+        t:SetWidth(1)
+        AT_SI.cvlines[i] = t
+    end
+    return t
+end
+
 local function getRowLabel(j)
     local fs = AT_SI.rowLabels[j]
     if not fs then
-        fs = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        fs = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         fs:SetJustifyH("LEFT")
-        fs:SetWidth(NAME_COL_W)
+        fs:SetWidth(NAME_COL_W - 14)
         AT_SI.rowLabels[j] = fs
     end
     return fs
+end
+
+-- Reset column = a hover frame (so it can show time-to-reset) with a fontstring.
+local function getResetCell(j)
+    local rc = AT_SI.resetCells[j]
+    if not rc then
+        rc = CreateFrame("Frame", nil, panel)
+        rc:SetSize(RESET_COL_W, ROW_H - ROW_GAP)
+        rc.text = rc:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        rc.text:SetPoint("LEFT", 6, 0)
+        rc.text:SetTextColor(0.62, 0.78, 0.95)
+        rc:EnableMouse(true)
+        rc:SetScript("OnEnter", function(self)
+            if not self.expires then return end
+            local rem = self.expires - time()
+            if rem <= 0 then return end
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:AddLine(self.raidName or "Reset", 0.6, 0.8, 1)
+            GameTooltip:AddLine("Resets in " .. fmtDur(rem), 0.9, 0.9, 0.9)
+            GameTooltip:AddLine(resetLabel(self.expires), 0.6, 0.85, 1)
+            GameTooltip:Show()
+        end)
+        rc:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        AT_SI.resetCells[j] = rc
+    end
+    return rc
+end
+
+-- Expansion header row: a clickable band with a +/- toggle and a label.
+local function getGroup(i)
+    local gh = AT_SI.groups[i]
+    if not gh then
+        gh = CreateFrame("Button", nil, panel)
+        gh.bg = gh:CreateTexture(nil, "BACKGROUND")
+        gh.bg:SetAllPoints(gh)
+        gh.icon = gh:CreateTexture(nil, "ARTWORK")
+        gh.icon:SetSize(16, 16)
+        gh.icon:SetPoint("LEFT", 6, 0)
+        gh.label = gh:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        gh.label:SetPoint("LEFT", gh.icon, "RIGHT", 6, 0)
+        gh.sep = gh:CreateTexture(nil, "OVERLAY")
+        gh.sep:SetHeight(1)
+        gh.sep:SetPoint("BOTTOMLEFT", 0, 0)
+        gh.sep:SetPoint("BOTTOMRIGHT", 0, 0)
+        gh.sep:SetColorTexture(unpack(AltTracker.C.ACCENT))
+        gh:SetScript("OnClick", function(self) toggleCollapse(self.key) end)
+        gh:SetScript("OnEnter", function(self) self.label:SetTextColor(unpack(AltTracker.C.ACCENT)) end)
+        gh:SetScript("OnLeave", function(self) self.label:SetTextColor(unpack(AltTracker.C.TEXT_BRIGHT)) end)
+        AT_SI.groups[i] = gh
+    end
+    return gh
+end
+
+-- A raid row's background: full-width plain band + a landmark thumbnail in the
+-- name cell + a readability shade. `art`/`solid` are SEPARATE textures on purpose.
+local function getBand(j)
+    local b = AT_SI.bands[j]
+    if not b then
+        b = {}
+        b.row   = panel:CreateTexture(nil, "BACKGROUND", nil, 1)
+        b.art   = panel:CreateTexture(nil, "BORDER", nil, 0)
+        b.shade = panel:CreateTexture(nil, "BORDER", nil, 1)
+        AT_SI.bands[j] = b
+    end
+    return b
+end
+
+local function getVLine(i)
+    local t = AT_SI.vlines[i]
+    if not t then
+        t = panel:CreateTexture(nil, "ARTWORK")
+        t:SetColorTexture(0, 0, 0, 0.40)
+        t:SetWidth(1)
+        AT_SI.vlines[i] = t
+    end
+    return t
+end
+
+local function getHLine(i)
+    local t = AT_SI.hlines[i]
+    if not t then
+        t = panel:CreateTexture(nil, "ARTWORK")
+        t:SetColorTexture(0, 0, 0, 0.40)
+        t:SetHeight(1)
+        AT_SI.hlines[i] = t
+    end
+    return t
+end
+
+-- Load a texture (cached by path). Verifies the load actually took.
+local function LoadTexture(tex, path)
+    if tex._appliedPath == path and path ~= nil then return true end
+    tex:SetTexture(nil)
+    if type(path) ~= "string" or path == "" then tex._appliedPath = nil; return false end
+    local ok = pcall(tex.SetTexture, tex, path)
+    if not ok or not tex:GetTexture() then tex:SetTexture(nil); tex._appliedPath = nil; return false end
+    tex._appliedPath = path
+    return true
+end
+
+-- Cover-crop the content region of the thumbnail into a dw x dh rect.
+local function fitBand(tex, dw, dh)
+    if dw <= 0 or dh <= 0 then return end
+    local dAsp = dw / dh
+    local u0, u1, v0, v1 = 0, 1, 0, 1
+    if dAsp > BAND_CASP then
+        local vis = BAND_CASP / dAsp
+        v0 = (1 - vis) / 2; v1 = 1 - v0
+    else
+        local vis = dAsp / BAND_CASP
+        u0 = (1 - vis) / 2; u1 = 1 - u0
+    end
+    tex:SetTexCoord(u0, u1, v0 * BAND_VSCALE, v1 * BAND_VSCALE)
 end
 
 -- Each cell is a mouse-enabled frame with a centered fontstring + a tooltip.
@@ -133,26 +491,58 @@ local function getCell(j, i)
     AT_SI.cells[j] = AT_SI.cells[j] or {}
     local cell = AT_SI.cells[j][i]
     if not cell then
-        cell = CreateFrame("Frame", nil, panel)
+        cell = CreateFrame("Frame", nil, colChild)
         cell:SetSize(COL_W, ROW_H)
         cell.text = cell:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         cell.text:SetPoint("CENTER")
         cell:EnableMouse(true)
         cell:SetScript("OnEnter", function(self)
-            if not self.info then return end
             local d = self.info
+            if not d then return end
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-            GameTooltip:AddLine(d.charName, 1, 1, 1)
-            local sub = d.diffName ~= "" and d.diffName or (d.size > 0 and (d.size .. "-man") or "")
-            GameTooltip:AddLine(d.raidName .. (sub ~= "" and (" |cff888888(" .. sub .. ")|r") or ""), 0.8, 0.8, 0.8)
+            GameTooltip:AddLine(d.raidName, 0.6, 0.8, 1)
+            local cc = d.class and RAID_CLASS_COLORS and RAID_CLASS_COLORS[d.class]
+            GameTooltip:AddLine(d.charName, cc and cc.r or 0.9, cc and cc.g or 0.9, cc and cc.b or 0.9)
             if d.total > 0 then
-                GameTooltip:AddLine("Bosses: " .. d.prog .. "/" .. d.total, 0.9, 0.9, 0.9)
+                GameTooltip:AddLine("Progress: " .. d.prog .. "/" .. d.total, 0.85, 0.85, 0.85)
             end
-            local rem = d.expires - time()
+            local rem = (d.expires or 0) - time()
             if rem > 0 then
                 GameTooltip:AddLine("Resets in " .. fmtDur(rem), 0.6, 0.85, 1)
-            else
-                GameTooltip:AddLine("Reset available", 0.5, 1, 0.5)
+            end
+
+            local bosses = d.bosses
+            if bosses and #bosses > 0 then
+                local killed
+                if d.mask ~= nil then
+                    killed = decodeMask(d.mask, #bosses)
+                elseif d.total > 0 and d.prog >= d.total then
+                    killed = {}; for e = 1, #bosses do killed[e] = true end
+                elseif (d.prog or 0) <= 0 then
+                    killed = {}; for e = 1, #bosses do killed[e] = false end
+                end
+                GameTooltip:AddLine(" ")
+                if killed then
+                    local nk = 0
+                    for _, v in ipairs(killed) do if v then nk = nk + 1 end end
+                    GameTooltip:AddLine("Bosses Killed (" .. nk .. ")", 0.4, 0.85, 0.4)
+                    for e = 1, #bosses do
+                        if killed[e] then GameTooltip:AddLine("  |cff66cc66+|r " .. bosses[e], 0.55, 0.8, 0.55) end
+                    end
+                    if nk < #bosses then
+                        GameTooltip:AddLine("Bosses Not Killed (" .. (#bosses - nk) .. ")", 0.85, 0.4, 0.4)
+                        for e = 1, #bosses do
+                            if not killed[e] then GameTooltip:AddLine("  |cffaa5555o|r " .. bosses[e], 0.75, 0.5, 0.5) end
+                        end
+                    end
+                else
+                    GameTooltip:AddLine("Bosses (" .. d.prog .. "/" .. d.total .. ")", 0.8, 0.8, 0.8)
+                    for e = 1, #bosses do
+                        GameTooltip:AddLine("  " .. bosses[e], 0.7, 0.7, 0.7)
+                    end
+                end
+            elseif d.total > 0 then
+                GameTooltip:AddLine("Bosses: " .. d.prog .. "/" .. d.total, 0.9, 0.9, 0.9)
             end
             GameTooltip:Show()
         end)
@@ -170,33 +560,80 @@ local function hideFrom(pool, from)
     for k = from, #pool do if pool[k] then pool[k]:Hide() end end
 end
 
+local function hideBand(b)
+    if b then b.row:Hide(); b.art:Hide(); b.shade:Hide() end
+end
+
 function AT_SI.Refresh()
     if not panel or not panel:IsShown() then return end
 
-    local chars, raids, lookup = gather()
+    local allChars, lookup = gather()
     local now = time()
+    local chars = columnsForView(allChars, lookup)
 
-    -- Empty state
-    if #chars == 0 or #raids == 0 then
+    if #chars == 0 then
         for _, fs in ipairs(AT_SI.headers) do fs:Hide() end
         for _, fs in ipairs(AT_SI.rowLabels) do fs:Hide() end
+        for _, rc in ipairs(AT_SI.resetCells) do rc:Hide() end
         for _, row in ipairs(AT_SI.cells) do for _, c in ipairs(row) do c:Hide() end end
+        for _, b in ipairs(AT_SI.bands) do hideBand(b) end
+        for _, t in ipairs(AT_SI.vlines) do t:Hide() end
+        for _, t in ipairs(AT_SI.cvlines) do t:Hide() end
+        for _, t in ipairs(AT_SI.hlines) do t:Hide() end
+        for _, g in ipairs(AT_SI.groups) do g:Hide() end
+        raidHdr:Hide(); resetHdr:Hide(); headerBG:Hide(); headerSep:Hide()
+        colScroll:Hide(); hbar:Hide()
+        if statsBar then statsBar:Hide() end
+        emptyFS:SetText((#allChars == 0) and "No characters tracked yet."
+                        or "No level-60+ characters to show here.")
         emptyFS:Show()
         return
     end
     emptyFS:Hide()
+    raidHdr:Show(); resetHdr:Show()
 
-    local nCols = math.min(#chars, MAX_COLS)
-    local nRows = math.min(#raids, MAX_ROWS)
+    local display  = buildDisplayRows(lookup)
+    local nCols    = math.min(#chars, MAX_COLS)
+    local colX0    = PAD_X + NAME_COL_W + RESET_COL_W
+    local rowTop   = PAD_Y + TITLE_H + HEADER_H
+    local hdrTop   = -(PAD_Y + TITLE_H)
+    local CHILD_DY = PAD_Y + TITLE_H          -- panelY + CHILD_DY = colChild-local y
 
-    -- Column headers = character names (class-coloured).
+    -- Total content height up front, to size the scroller.
+    local contentH = 0
+    for _, drow in ipairs(display) do contentH = contentH + (drow.isGroup and GROUP_H or ROW_H) end
+
+    -- Horizontal viewport: at most MAX_VIEW_COLS character columns before scrolling.
+    local fullColsW = nCols * COL_W
+    local viewportW = math.min(nCols, MAX_VIEW_COLS) * COL_W
+    local visibleR  = colX0 + viewportW
+    local maxScroll = math.max(0, fullColsW - viewportW)
+
+    colScroll:ClearAllPoints()
+    colScroll:SetPoint("TOPLEFT", panel, "TOPLEFT", colX0, hdrTop)
+    colScroll:SetSize(viewportW, HEADER_H + contentH)
+    colChild:SetSize(math.max(fullColsW, viewportW), HEADER_H + contentH)
+    colScroll:Show()
+
+    -- Header band + gold underline (spans the visible width; char headers scroll over it).
+    headerBG:ClearAllPoints()
+    headerBG:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD_X, hdrTop)
+    headerBG:SetPoint("BOTTOMRIGHT", panel, "TOPLEFT", visibleR, hdrTop - HEADER_H)
+    headerBG:SetColorTexture(unpack(AltTracker.C.BG_HEADER))
+    headerBG:Show()
+    headerSep:ClearAllPoints()
+    headerSep:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD_X, hdrTop - HEADER_H)
+    headerSep:SetPoint("TOPRIGHT", panel, "TOPLEFT", visibleR, hdrTop - HEADER_H)
+    headerSep:Show()
+
+    -- Character headers (class-coloured) — on colChild, so they scroll.
     for i = 1, nCols do
         local ch = chars[i]
         local fs = getHeader(i)
         fs:ClearAllPoints()
-        fs:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD_X + NAME_COL_W + (i - 1) * COL_W, -(PAD_Y + TITLE_H))
+        fs:SetPoint("TOPLEFT", colChild, "TOPLEFT", (i - 1) * COL_W, -5)
         local nm = ch.name or "?"
-        if #nm > 8 then nm = nm:sub(1, 8) end
+        if #nm > 9 then nm = nm:sub(1, 9) end
         fs:SetText(nm)
         local cc = ch.class and RAID_CLASS_COLORS and RAID_CLASS_COLORS[ch.class]
         if cc then fs:SetTextColor(cc.r, cc.g, cc.b) else fs:SetTextColor(0.9, 0.9, 0.9) end
@@ -204,46 +641,195 @@ function AT_SI.Refresh()
     end
     hideFrom(AT_SI.headers, nCols + 1)
 
-    -- Rows = raids; left label + one cell per character.
-    local rowTop = PAD_Y + TITLE_H + HEADER_H
-    for j = 1, nRows do
-        local raid = raids[j]
-        local y = -(rowTop + (j - 1) * ROW_H)
+    local activeSaves, sumProg, sumTotal = 0, 0, 0
+    local rr, gg, hl = 0, 0, 0        -- raid-row, group, h-line counters
+    local yOff = rowTop               -- running offset from panel top (positive)
 
-        local lbl = getRowLabel(j)
-        lbl:ClearAllPoints()
-        lbl:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD_X, y - 3)
-        local diffSuffix = (raid.size > 0 and raid.diff > 1) and (" |cff888888H|r") or ""
-        lbl:SetText(raid.name .. diffSuffix)
-        lbl:SetTextColor(unpack(AltTracker.C.TEXT_NORM))
-        lbl:Show()
-
-        for i = 1, nCols do
-            local cell = getCell(j, i)
-            cell:ClearAllPoints()
-            cell:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD_X + NAME_COL_W + (i - 1) * COL_W, y)
-            local lk = lookup[chars[i].guid] and lookup[chars[i].guid][raid.raidKey]
-            if lk and lk.expires > now then
-                cell.text:SetText(lk.total > 0 and (lk.prog .. "/" .. lk.total) or "\226\151\143")  -- "●" if no boss count
-                cell.text:SetTextColor(resetColor(lk.expires - now))
-                cell.info = {
-                    charName = chars[i].name, raidName = raid.name,
-                    prog = lk.prog, total = lk.total, size = lk.size,
-                    diffName = lk.diffName, expires = lk.expires,
-                }
-                cell:Show()
-            else
-                cell.text:SetText("")
-                cell.info = nil
-                cell:Show()   -- kept shown (empty) so the grid stays aligned
-            end
-        end
-        for i = nCols + 1, #(AT_SI.cells[j] or {}) do AT_SI.cells[j][i]:Hide() end
+    do  -- top border of the grid
+        local t = getHLine(hl + 1); hl = hl + 1
+        t:ClearAllPoints()
+        t:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD_X, -yOff)
+        t:SetPoint("TOPRIGHT", panel, "TOPLEFT", visibleR, -yOff)
+        t:Show()
     end
-    -- Hide any leftover rows from a previous (larger) render.
-    hideFrom(AT_SI.rowLabels, nRows + 1)
-    for j = nRows + 1, #AT_SI.cells do
-        for _, c in ipairs(AT_SI.cells[j]) do c:Hide() end
+
+    for _, drow in ipairs(display) do
+        local y = -yOff
+        if drow.isGroup then
+            gg = gg + 1
+            local gh = getGroup(gg)
+            gh.key = drow.key
+            gh:ClearAllPoints()
+            gh:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD_X, y)
+            gh:SetSize(math.max(1, visibleR - PAD_X), GROUP_H)
+            gh:SetFrameLevel(colScroll:GetFrameLevel() + 5)   -- above the scrolled cells
+            gh.bg:SetColorTexture(unpack(AltTracker.C.BG_GROUP))
+            gh.icon:SetTexture(isCollapsed(drow.key)
+                and "Interface\\Buttons\\UI-PlusButton-Up"
+                or  "Interface\\Buttons\\UI-MinusButton-Up")
+            gh.label:SetText(drow.label)
+            gh.label:SetTextColor(unpack(AltTracker.C.TEXT_BRIGHT))
+            gh:Show()
+            yOff = yOff + GROUP_H
+        else
+            rr = rr + 1
+            local raid = drow.raid
+            local rh = ROW_H - ROW_GAP
+            local childY = y + CHILD_DY     -- this row's top, in colChild-local coords
+
+            local band = getBand(rr)
+            band.row:ClearAllPoints()
+            band.row:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD_X, y)
+            band.row:SetPoint("BOTTOMRIGHT", panel, "TOPLEFT", visibleR, y - rh)
+            band.row:SetColorTexture(0.11, 0.11, 0.14, 0.92)
+            band.row:Show()
+
+            local artPath = raid.art and ((AltTracker.MEDIA_PATH or "Interface\\AddOns\\AltTracker\\Media\\")
+                            .. "Raids\\scene-raid-" .. raid.art .. ".tga")
+            if artPath and LoadTexture(band.art, artPath) then
+                band.art:ClearAllPoints()
+                band.art:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD_X, y)
+                band.art:SetPoint("BOTTOMRIGHT", panel, "TOPLEFT", PAD_X + NAME_COL_W, y - rh)
+                fitBand(band.art, NAME_COL_W, rh)
+                band.art:Show()
+                band.shade:ClearAllPoints()
+                band.shade:SetAllPoints(band.art)
+                band.shade:SetColorTexture(0, 0, 0, 0.42)
+                band.shade:Show()
+            else
+                band.art:Hide(); band.shade:Hide()
+            end
+
+            local lbl = getRowLabel(rr)
+            lbl:ClearAllPoints()
+            lbl:SetPoint("LEFT", panel, "TOPLEFT", PAD_X + 8, y - rh / 2)
+            lbl:SetText(raid.display)
+            lbl:SetTextColor(unpack(raid.isOther and AltTracker.C.TEXT_DIM or AltTracker.C.TEXT_BRIGHT))
+            lbl:Show()
+
+            -- Reset day/time (real value only; blank when nobody is saved).
+            local resetExpires
+            for i = 1, nCols do
+                local lk = findLockout(lookup[chars[i].guid], raid)
+                if lk and lk.expires > now then resetExpires = lk.expires; break end
+            end
+            local rc = getResetCell(rr)
+            rc:ClearAllPoints()
+            rc:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD_X + NAME_COL_W, y)
+            rc:SetSize(RESET_COL_W, rh)
+            rc.text:SetText(resetExpires and resetLabel(resetExpires) or "")
+            rc.expires = resetExpires
+            rc.raidName = raid.display
+            rc:Show()
+
+            for i = 1, nCols do
+                local cell = getCell(rr, i)
+                cell:ClearAllPoints()
+                cell:SetPoint("TOPLEFT", colChild, "TOPLEFT", (i - 1) * COL_W, childY)
+                cell:SetSize(COL_W, rh)
+                local lk = findLockout(lookup[chars[i].guid], raid)
+                if lk and lk.expires > now then
+                    cell.text:SetText(lk.total > 0 and (lk.prog .. "/" .. lk.total) or "\226\151\143")
+                    cell.text:SetTextColor(resetColor(lk.expires - now))
+                    cell.info = {
+                        charName = chars[i].name, class = chars[i].class,
+                        raidName = raid.display, bosses = raid.bosses,
+                        prog = lk.prog, total = lk.total, mask = lk.mask,
+                        expires = lk.expires,
+                    }
+                    activeSaves = activeSaves + 1
+                    sumProg  = sumProg + (lk.prog or 0)
+                    sumTotal = sumTotal + (lk.total or 0)
+                    cell:Show()
+                else
+                    cell.text:SetText("|cff555555\226\128\148|r")   -- dim em-dash
+                    cell.info = nil
+                    cell:Show()
+                end
+            end
+            for i = nCols + 1, #(AT_SI.cells[rr] or {}) do AT_SI.cells[rr][i]:Hide() end
+            yOff = yOff + ROW_H
+        end
+
+        -- Bottom border of this display row (frozen, spans the visible width).
+        local t = getHLine(hl + 1); hl = hl + 1
+        t:ClearAllPoints()
+        t:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD_X, -yOff)
+        t:SetPoint("TOPRIGHT", panel, "TOPLEFT", visibleR, -yOff)
+        t:Show()
+    end
+
+    -- Frozen vertical separators (name|reset, reset|chars) on the panel.
+    do
+        local fx = { PAD_X + NAME_COL_W, colX0 }
+        for i = 1, #fx do
+            local t = getVLine(i)
+            t:ClearAllPoints()
+            t:SetPoint("TOPLEFT", panel, "TOPLEFT", fx[i], -rowTop)
+            t:SetPoint("BOTTOMLEFT", panel, "TOPLEFT", fx[i], -yOff)
+            t:Show()
+        end
+        hideFrom(AT_SI.vlines, 3)
+    end
+
+    -- Character column separators — on colChild, so they scroll. Group header
+    -- bands (opaque, above colScroll) mask them within header rows.
+    local cvTop = -(HEADER_H)
+    local cvBot = -(HEADER_H + contentH)
+    for i = 1, nCols do
+        local t = getCVLine(i)
+        t:ClearAllPoints()
+        t:SetPoint("TOPLEFT", colChild, "TOPLEFT", i * COL_W, cvTop)
+        t:SetPoint("BOTTOMLEFT", colChild, "TOPLEFT", i * COL_W, cvBot)
+        t:Show()
+    end
+    hideFrom(AT_SI.cvlines, nCols + 1)
+
+    -- Horizontal scrollbar (only when the columns overflow the viewport).
+    if maxScroll > 0 then
+        hbar:SetMinMaxValues(0, maxScroll)
+        if hbar:GetValue() > maxScroll then hbar:SetValue(maxScroll) end
+        colScroll:SetHorizontalScroll(hbar:GetValue())
+        hbar:ClearAllPoints()
+        hbar:SetPoint("TOPLEFT", panel, "TOPLEFT", colX0, -(rowTop + contentH + 3))
+        hbar:SetWidth(viewportW)
+        hbar:Show()
+    else
+        colScroll:SetHorizontalScroll(0)
+        hbar:SetValue(0)
+        hbar:Hide()
+    end
+
+    -- Hide leftovers.
+    hideFrom(AT_SI.rowLabels, rr + 1)
+    hideFrom(AT_SI.resetCells, rr + 1)
+    for j = rr + 1, #AT_SI.cells do for _, c in ipairs(AT_SI.cells[j]) do c:Hide() end end
+    for j = rr + 1, #AT_SI.bands do hideBand(AT_SI.bands[j]) end
+    hideFrom(AT_SI.groups, gg + 1)
+    hideFrom(AT_SI.hlines, hl + 1)
+
+    -- Stats bar.
+    local pct = (sumTotal > 0) and (" (" .. math.floor(100 * sumProg / sumTotal + 0.5) .. "%)") or ""
+    local defeated = (sumTotal > 0) and (sumProg .. "/" .. sumTotal .. pct) or "—"
+    statsFS:SetText(("|cffffd100Active saves:|r %d       |cffffd100Bosses defeated:|r %s       |cffffd100Characters tracked:|r %d")
+        :format(activeSaves, defeated, nCols))
+    statsBar:Show()
+
+    -- Size the shared window to our content (plugins own their sizing). Width fits
+    -- the frozen columns + the (capped) character viewport; extra alts scroll.
+    local f = _G["AltTrackerSheet"]
+    if f and AT_SI._sidebarW then
+        local leftBase = AT_SI._sidebarW + 1 + PAD_X
+        local wGrid    = leftBase + (NAME_COL_W + RESET_COL_W + viewportW) + 12
+        local wFooter  = leftBase + (statsFS:GetStringWidth() or 0) + PAD_X + 6
+        local w = math.max(wGrid, wFooter, 560)
+        local h = (AT_SI._titleH or 30) + (PAD_Y + TITLE_H + HEADER_H) + contentH
+                + (maxScroll > 0 and HBAR_H or 0) + STATS_H + 8
+        local sidebarMin = (AT_SI._titleH or 30)
+                + (AltTracker.GetSidebarRequiredHeight and AltTracker.GetSidebarRequiredHeight() or 0)
+        if h < sidebarMin then h = sidebarMin end
+        if h > MAX_FRAME_H then h = MAX_FRAME_H end
+        f:SetSize(w, h)
     end
 end
 
@@ -255,6 +841,8 @@ local function BuildPanel(mainFrame)
     if panel then return end
     local sidebarW = (AltTracker.LAYOUT and AltTracker.LAYOUT.SIDEBAR_WIDTH) or 230
     local titleH   = (AltTracker.LAYOUT and AltTracker.LAYOUT.TITLE_H) or 30
+    AT_SI._sidebarW = sidebarW
+    AT_SI._titleH   = titleH
 
     panel = CreateFrame("Frame", nil, mainFrame, "BackdropTemplate")
     panel:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", sidebarW + 1, -titleH)
@@ -262,10 +850,72 @@ local function BuildPanel(mainFrame)
     AltTracker.ApplyBGOnly(panel, AltTracker.C.BG_MAIN[1], AltTracker.C.BG_MAIN[2], AltTracker.C.BG_MAIN[3], AltTracker.C.BG_MAIN[4])
     panel:Hide()
 
+    -- Horizontally-scrolling viewport for the character columns (Raid + Reset stay
+    -- frozen on the panel). colChild holds the char headers/cells/grid lines.
+    colScroll = CreateFrame("ScrollFrame", nil, panel)
+    colChild  = CreateFrame("Frame", nil, colScroll)
+    colChild:SetSize(1, 1)
+    colScroll:SetScrollChild(colChild)
+    colScroll:EnableMouseWheel(true)
+    colScroll:SetScript("OnMouseWheel", function(_, delta)
+        if hbar and hbar:IsShown() then hbar:SetValue(hbar:GetValue() - delta * COL_W) end
+    end)
+    colScroll:Hide()
+
+    hbar = CreateFrame("Slider", nil, panel)
+    hbar:SetOrientation("HORIZONTAL")
+    hbar:SetHeight(HBAR_H)
+    hbar:SetValueStep(1)
+    local hbarTrack = hbar:CreateTexture(nil, "BACKGROUND")
+    hbarTrack:SetAllPoints(hbar)
+    hbarTrack:SetColorTexture(0, 0, 0, 0.40)
+    local hbarThumb = hbar:CreateTexture(nil, "OVERLAY")
+    hbarThumb:SetColorTexture(AltTracker.C.ACCENT[1], AltTracker.C.ACCENT[2], AltTracker.C.ACCENT[3], 0.85)
+    hbarThumb:SetSize(48, HBAR_H)
+    hbar:SetThumbTexture(hbarThumb)
+    hbar:SetScript("OnValueChanged", function(_, val)
+        if colScroll then colScroll:SetHorizontalScroll(val) end
+    end)
+    hbar:Hide()
+
     titleFS = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     titleFS:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD_X, -PAD_Y + 2)
     titleFS:SetText("Raid Lockouts")
     titleFS:SetTextColor(unpack(AltTracker.C.TEXT_BRIGHT))
+
+    headerBG = panel:CreateTexture(nil, "BACKGROUND", nil, 2)
+    headerBG:Hide()
+    headerSep = panel:CreateTexture(nil, "ARTWORK")
+    headerSep:SetHeight(1)
+    headerSep:SetColorTexture(unpack(AltTracker.C.ACCENT))
+    headerSep:Hide()
+
+    raidHdr = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    raidHdr:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD_X + 8, -(PAD_Y + TITLE_H + 5))
+    raidHdr:SetText("Raid")
+    raidHdr:SetTextColor(unpack(AltTracker.C.TEXT_BRIGHT))
+    raidHdr:Hide()
+
+    resetHdr = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    resetHdr:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD_X + NAME_COL_W + 6, -(PAD_Y + TITLE_H + 5))
+    resetHdr:SetText("Reset")
+    resetHdr:SetTextColor(unpack(AltTracker.C.TEXT_BRIGHT))
+    resetHdr:Hide()
+
+    statsBar = CreateFrame("Frame", nil, panel)
+    statsBar:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 0, 0)
+    statsBar:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, 0)
+    statsBar:SetHeight(STATS_H)
+    AltTracker.ApplyBGOnly(statsBar, AltTracker.C.BG_FOOTER[1], AltTracker.C.BG_FOOTER[2], AltTracker.C.BG_FOOTER[3], AltTracker.C.BG_FOOTER[4])
+    local footSep = statsBar:CreateTexture(nil, "ARTWORK")
+    footSep:SetHeight(1)
+    footSep:SetPoint("TOPLEFT", statsBar, "TOPLEFT", 0, 0)
+    footSep:SetPoint("TOPRIGHT", statsBar, "TOPRIGHT", 0, 0)
+    footSep:SetColorTexture(unpack(AltTracker.C.ACCENT))
+    statsFS = statsBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    statsFS:SetPoint("LEFT", statsBar, "LEFT", PAD_X, 0)
+    statsFS:SetTextColor(unpack(AltTracker.C.TEXT_BRIGHT))
+    statsBar:Hide()
 
     emptyFS = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     emptyFS:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD_X, -(PAD_Y + TITLE_H + 6))
@@ -325,7 +975,12 @@ function AT_SI._Bootstrap()
         _isPlugin    = true,
         OnActivate   = function(mainFrame) AT_SI.Activate(mainFrame) end,
         OnDeactivate = function(mainFrame) AT_SI.Deactivate(mainFrame) end,
-        _test        = { parseLockout = parseLockout, gather = gather },
+        _test        = {
+            parseLockout = parseLockout, gather = gather, decodeMask = decodeMask,
+            matchRaid = matchRaid, columnsForView = columnsForView,
+            buildDisplayRows = buildDisplayRows, toggleCollapse = toggleCollapse,
+            isCollapsed = isCollapsed, RAIDS = RAIDS,
+        },
     })
 end
 

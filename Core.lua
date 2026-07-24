@@ -1027,9 +1027,33 @@ local function ScanSavedInstances()
             -- Round to the minute: a later re-scan reports the same reset moment
             -- via a smaller `reset`, so now+reset is stable and won't re-bump.
             local expiresAt = math.floor((now + reset) / 60) * 60
-            local key = "si_" .. name .. "@" .. tostring(difficulty or 0)
+            local diff = tostring(difficulty or 0)
+            local key = "si_" .. name .. "@" .. diff
             newSet[key] = expiresAt .. "|" .. (encounterProgress or 0) .. "|"
                        .. (numEncounters or 0) .. "|" .. (maxPlayers or 0) .. "|" .. (difficultyName or "")
+
+            -- Per-boss kill state as a positional bitmask (bit e-1 set = encounter e
+            -- dead), so the Raids plugin can show a named Killed / Not-killed list.
+            -- Stored as a SEPARATE si_boss_<name>@<diff> field, NOT appended to the
+            -- si_ value: the "si_boss_" prefix still matches the existing "^si_"
+            -- serialize / clear / orphan-drop rules, so it syncs, gets cleaned up on
+            -- expiry, and old clients can't resurrect a stale mask — while
+            -- parseLockout rejects it (the value has no pipes), so no protocol bump is
+            -- needed. Boss NAMES aren't synced; the plugin maps bit positions to a
+            -- static boss list, so the encounter ORDER must stay stable (verified in
+            -- game). Routed through newSet like every other field so the diff below
+            -- flags `changed` and the delta sync picks it up.
+            if type(GetSavedInstanceEncounterInfo) == "function"
+               and numEncounters and numEncounters > 0 then
+                local mask = 0
+                for e = 1, numEncounters do
+                    local _, _, isKilled = GetSavedInstanceEncounterInfo(i, e)
+                    if isKilled then mask = mask + 2 ^ (e - 1) end
+                end
+                if mask > 0 then
+                    newSet["si_boss_" .. name .. "@" .. diff] = tostring(mask)
+                end
+            end
         end
     end
 
