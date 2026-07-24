@@ -31,11 +31,15 @@ local lastCamp, lastSelected
 local DEFAULT_SRC_W = 512
 local DEFAULT_SRC_H = 896
 
+-- scenic backdrop (cover-cropped to the panel; procedural floor if the file is missing)
+local BACKDROP_IMAGE = "Interface\\AddOns\\AltTracker\\Media\\Scene\\roster-campsite.tga"
+local BACKDROP_W, BACKDROP_H = 1024, 682
+
 -- cutout "hero carousel" layout: the selected character is centered and largest,
 -- the rest flank it symmetrically, shrinking and dimming with distance (perspective).
 local SCENE_NAME_BAND    = 26     -- reserved strip at the bottom for name labels
 local SCENE_FLOOR_INSET  = 8      -- feet sit this far above the name band
-local SCENE_HEIGHT_FRAC  = 0.96   -- center character height as a fraction of usable height
+local SCENE_HEIGHT_FRAC  = 0.80   -- center character height as a fraction of usable height
 local CAROUSEL_SHRINK    = 0.74   -- each step out from center scales by this
 local CAROUSEL_STEP_FRAC = 0.15   -- base horizontal step as a fraction of scene width
 local CAROUSEL_MINSCALE  = 0.42   -- floor on the perspective shrink
@@ -351,19 +355,38 @@ end
 -- Backdrop
 -- ---------------------------------------------------------------------------
 local function BuildBackdrop()
-    AltTracker.ApplyBGOnly(root, 0.035, 0.04, 0.055, 1)   -- night sky
+    AltTracker.ApplyBGOnly(root, 0.035, 0.04, 0.055, 1)   -- fallback night sky
 
-    root.ground = root:CreateTexture(nil, "BACKGROUND")
-    root.ground:SetColorTexture(0.075, 0.07, 0.062, 1)     -- warmer campsite floor
-    root.ground:SetPoint("BOTTOMLEFT", root, "BOTTOMLEFT", 0, 0)
-    root.ground:SetPoint("BOTTOMRIGHT", root, "BOTTOMRIGHT", 0, 0)
-    root.ground:SetPoint("TOP", root, "BOTTOM", 0, 160)
+    root.image = root:CreateTexture(nil, "BACKGROUND")
+    root.image:SetAllPoints(root)
+    local ok = pcall(root.image.SetTexture, root.image, BACKDROP_IMAGE)
+    root._hasBackdropImage = (ok and root.image:GetTexture()) and true or false
 
-    root.horizon = root:CreateTexture(nil, "BACKGROUND")
-    root.horizon:SetHeight(1)
-    root.horizon:SetPoint("BOTTOMLEFT", root.ground, "TOPLEFT", 0, 0)
-    root.horizon:SetPoint("BOTTOMRIGHT", root.ground, "TOPRIGHT", 0, 0)
-    root.horizon:SetColorTexture(0.0, 0.0, 0.0, 0.35)
+    if root._hasBackdropImage then
+        root.image:Show()
+    else
+        root.image:Hide()
+        -- procedural campsite floor (used only when the backdrop image is missing)
+        root.ground = root:CreateTexture(nil, "BACKGROUND")
+        root.ground:SetColorTexture(0.075, 0.07, 0.062, 1)
+        root.ground:SetPoint("BOTTOMLEFT", root, "BOTTOMLEFT", 0, 0)
+        root.ground:SetPoint("BOTTOMRIGHT", root, "BOTTOMRIGHT", 0, 0)
+        root.ground:SetPoint("TOP", root, "BOTTOM", 0, 160)
+
+        root.horizon = root:CreateTexture(nil, "BACKGROUND")
+        root.horizon:SetHeight(1)
+        root.horizon:SetPoint("BOTTOMLEFT", root.ground, "TOPLEFT", 0, 0)
+        root.horizon:SetPoint("BOTTOMRIGHT", root.ground, "TOPRIGHT", 0, 0)
+        root.horizon:SetColorTexture(0.0, 0.0, 0.0, 0.35)
+    end
+end
+
+-- Cover-crop the backdrop image to the panel aspect (no stretch).
+local function LayoutBackdrop(rW, rH)
+    if root and root._hasBackdropImage and root.image then
+        local u1, u2, v1, v2 = CoverTexCoord(rW, rH, BACKDROP_W, BACKDROP_H)
+        root.image:SetTexCoord(u1, u2, v1, v2)
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -424,6 +447,7 @@ function RosterScene.Render(camp, selectedGuid)
 
     local rW = math.max(1, root:GetWidth())
     local rH = math.max(1, root:GetHeight())
+    LayoutBackdrop(rW, rH)
 
     if CampHasCutouts(camp) then
         local centerX  = rW / 2
