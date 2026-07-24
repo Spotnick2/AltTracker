@@ -172,7 +172,7 @@ public static class HeroShotPromptBuilder
                 : $"a one-handed {mainType}";
             var offDesc = string.IsNullOrWhiteSpace(offType)
                 ? "a distinct off-hand item"
-                : $"a {offType}";
+                : $"{Article(offType)} {offType}";
 
             if (cls.Equals("priest", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(mainType))
             {
@@ -343,6 +343,11 @@ public static class HeroShotPromptBuilder
         if (ContainsAny(text, "orb", "focus", "tome", "book", "lantern", "idol", "totem", "libram", "relic")) return "magical focus";
         return "off-hand item";
     }
+
+    /// <summary>"a"/"an" for the given word based on a leading vowel sound (good enough for our
+    /// weapon/off-hand vocabulary, e.g. "an off-hand item", "a shield").</summary>
+    private static string Article(string word) =>
+        !string.IsNullOrEmpty(word) && "aeiou".Contains(char.ToLowerInvariant(word[0])) ? "an" : "a";
 
     private static bool ContainsAny(string text, params string[] needles)
     {

@@ -204,7 +204,8 @@ public sealed class CodexImagegenProvider : IHeroShotRenderProvider
             sb.AppendLine();
             sb.AppendLine("Then generate a NEW image (do NOT merely return or minimally edit the reference). " +
                           "Use the reference ONLY as visual guidance for the character's identity, proportions, " +
-                          "armor, and colors. The image to generate:");
+                          "and pose. Take the armor and weapons from the equipped gear list in the prompt below, " +
+                          "not from the reference. The image to generate:");
         }
         else
         {
