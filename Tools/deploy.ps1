@@ -9,6 +9,7 @@
         Plugins/Professions/   -> AddOns/AltTrackerProfessions (Recipes, LoadOnDemand)
         Plugins/Roster/        -> AddOns/AltTrackerRoster      (Roster,  LoadOnDemand)
         Plugins/Instances/     -> AddOns/AltTrackerInstances   (Raids,   LoadOnDemand)
+        Plugins/Warband/       -> AddOns/AltTrackerWarband     (Warband, LoadOnDemand)
 
     Usage:
         pwsh Tools/deploy.ps1
@@ -61,6 +62,7 @@ Deploy-Tree $RepoRoot            "AltTracker"            $coreExcludeDirs $coreE
 Deploy-Tree (Join-Path $RepoRoot "Plugins\Professions") "AltTrackerProfessions" @() @() -Mirror
 Deploy-Tree (Join-Path $RepoRoot "Plugins\Roster")      "AltTrackerRoster"      @() @() -Mirror
 Deploy-Tree (Join-Path $RepoRoot "Plugins\Instances")   "AltTrackerInstances"   @() @() -Mirror
+Deploy-Tree (Join-Path $RepoRoot "Plugins\Warband")     "AltTrackerWarband"     @() @() -Mirror
 
 Write-Host "Done. Deployed to $AddOnsPath" -ForegroundColor Green
 Write-Host "In-game: /reload  (keep AltTrackerProfessions & AltTrackerRoster enabled in the AddOns list)."

@@ -394,7 +394,10 @@ local function SerializePlayer(guid, sinceTS)
     -- Delta skip: recipesStamp rides the character's lastUpdate, so a peer whose
     -- watermark (sinceTS) already covers it has these recipes. Returning "" omits
     -- the recipe line entirely, and the receiver keeps its existing recipe data.
-    if sinceTS and sinceTS > 0 and (db.recipesStamp or 0) <= sinceTS then
+    -- Strict "<": the core delta includes a char at lastUpdate >= sinceTS, so
+    -- skipping at equality would drop a same-second change once the watermark
+    -- reaches it. Resend-on-equality is idempotent.
+    if sinceTS and sinceTS > 0 and (db.recipesStamp or 0) < sinceTS then
         return ""
     end
     local profBlocks = {}
