@@ -420,37 +420,46 @@ local function LayoutBackdrop(rW, rH)
     end
 end
 
--- Apply backdrop #idx: show its image (or the procedural floor when file is nil/missing),
--- update the picker label, and persist the choice.
-local function ApplyBackdrop(idx)
-    local n = #SCENE_BACKDROPS
-    if n == 0 or not root then return end
-    idx = ((idx - 1) % n) + 1
-    curBackdrop = idx
-    local bd = SCENE_BACKDROPS[idx]
-
-    local haveImage = false
-    if bd.file and root.image then
-        local ok = pcall(root.image.SetTexture, root.image, bd.file)
-        haveImage = (ok and root.image:GetTexture()) and true or false
-    end
-    root._hasBackdropImage = haveImage
-
-    if haveImage then
-        curBW, curBH = bd.w or 1024, bd.h or 682
-        curBTH = bd.texh or curBH
+-- (Re)load and place the current backdrop's texture. This is called from Render — i.e. AFTER
+-- the UI is fully up — on purpose: loading the texture at Build/show time renders BLACK after a
+-- /reload (works only on a cold client start). The character cutouts never have this problem
+-- precisely because they (re)load their textures in Render. LoadTexture caches by path, so the
+-- repeated Render calls are cheap; on /reload the cache is empty and it loads fresh here.
+local function ApplyBackdropTexture(rW, rH)
+    if not root or not root.image then return end
+    local bd = SCENE_BACKDROPS[curBackdrop]
+    local ok = (bd and bd.file and LoadTexture(root.image, bd.file)) or false
+    root._hasBackdropImage = ok
+    if ok then
         root.image:Show()
         if root.ground then root.ground:Hide() end
         if root.horizon then root.horizon:Hide() end
-        LayoutBackdrop(root:GetWidth(), root:GetHeight())
+        LayoutBackdrop(rW, rH)
     else
-        if root.image then root.image:Hide() end
+        root.image:Hide()
         if root.ground then root.ground:Show() end
         if root.horizon then root.horizon:Show() end
     end
+end
 
-    if root.picker then root.picker.label:SetText(bd.label or "") end
+-- Select backdrop #idx: set its dims/label and persist the choice. Does NOT load the texture —
+-- that happens in Render (ApplyBackdropTexture), so it survives /reload.
+local function SelectBackdrop(idx)
+    local n = #SCENE_BACKDROPS
+    if n == 0 then return end
+    idx = ((idx - 1) % n) + 1
+    curBackdrop = idx
+    local bd = SCENE_BACKDROPS[idx]
+    curBW, curBH = bd.w or 1024, bd.h or 682
+    curBTH = bd.texh or curBH
+    if root and root.picker then root.picker.label:SetText(bd.label or "") end
     if api.setBackdropId then api.setBackdropId(bd.id) end
+end
+
+-- Switch to backdrop #idx and apply it immediately (picker cycles, while the scene is visible).
+local function ApplyBackdrop(idx)
+    SelectBackdrop(idx)
+    if root then ApplyBackdropTexture(root:GetWidth(), root:GetHeight()) end
 end
 
 local function CycleBackdrop(delta)
@@ -507,7 +516,8 @@ local function BuildBackdrop()
         root.picker = pick
     end
 
-    -- restore the saved backdrop (by id), else default to the first
+    -- restore the saved backdrop (by id), else default to the first. Only SELECT it here;
+    -- the texture is loaded later in Render (loading it now would render black after /reload).
     local savedId = api.getBackdropId and api.getBackdropId()
     local startIdx = 1
     if savedId then
@@ -515,7 +525,7 @@ local function BuildBackdrop()
             if bd.id == savedId then startIdx = i; break end
         end
     end
-    ApplyBackdrop(startIdx)
+    SelectBackdrop(startIdx)
 end
 
 -- ---------------------------------------------------------------------------
@@ -592,10 +602,8 @@ function RosterScene.SetVisible(show)
     if not root then return end
     if show then
         root:Show()
-        -- Re-apply the backdrop texture now that the scene is actually shown. On /reload the
-        -- Build-time SetTexture can run before the graphics are ready and render black; the
-        -- cutouts survive precisely because Render re-applies their textures. Do the same here.
-        ApplyBackdrop(curBackdrop)
+        -- The backdrop texture is (re)loaded in Render (which runs right after, via Refresh) —
+        -- loading it here/at Build renders black after a /reload.
     else
         root:Hide()
         GameTooltip:Hide()
@@ -617,6 +625,11 @@ function RosterScene.Render(camp, selectedGuid)
     if not root then return end
     lastCamp, lastSelected = camp, selectedGuid
 
+    local rW = math.max(1, root:GetWidth())
+    local rH = math.max(1, root:GetHeight())
+    -- (re)load + place the backdrop here (render time) so it survives /reload, like the cutouts
+    ApplyBackdropTexture(rW, rH)
+
     local n = camp and #camp or 0
     if n == 0 then
         hintText:Show()
@@ -625,10 +638,6 @@ function RosterScene.Render(camp, selectedGuid)
         return
     end
     hintText:Hide()
-
-    local rW = math.max(1, root:GetWidth())
-    local rH = math.max(1, root:GetHeight())
-    LayoutBackdrop(rW, rH)
 
     if CampHasCutouts(camp) then
         local centerX  = rW / 2

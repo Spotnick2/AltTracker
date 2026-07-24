@@ -56,7 +56,8 @@ $coreExcludeDirs = @(
     (Join-Path $RepoRoot ".github"),
     (Join-Path $RepoRoot ".claude")
 )
-$coreExcludeFiles = @("*.log", "*.zip", "settings.ini", "*.md")
+# *.png: source art only (backdrop sources, render references) — WoW loads TGA/BLP, never PNG.
+$coreExcludeFiles = @("*.log", "*.zip", "settings.ini", "*.md", "*.png")
 
 Deploy-Tree $RepoRoot            "AltTracker"            $coreExcludeDirs $coreExcludeFiles
 Deploy-Tree (Join-Path $RepoRoot "Plugins\Professions") "AltTrackerProfessions" @() @() -Mirror
