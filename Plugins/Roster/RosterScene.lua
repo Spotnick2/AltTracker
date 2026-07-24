@@ -442,12 +442,14 @@ end
 -- /reload (works only on a cold client start). The character cutouts never have this problem
 -- precisely because they (re)load their textures in Render. LoadTexture caches by path, so the
 -- repeated Render calls are cheap; on /reload the cache is empty and it loads fresh here.
+local backdropRetries = 0
 local function ApplyBackdropTexture(rW, rH)
     if not root or not root.image then return end
     local bd = SCENE_BACKDROPS[curBackdrop]
     local ok = (bd and bd.file and LoadTexture(root.image, bd.file)) or false
     root._hasBackdropImage = ok
     if ok then
+        backdropRetries = 0
         root.image:Show()
         if root.ground then root.ground:Hide() end
         if root.horizon then root.horizon:Hide() end
@@ -456,6 +458,20 @@ local function ApplyBackdropTexture(rW, rH)
         root.image:Hide()
         if root.ground then root.ground:Show() end
         if root.horizon then root.horizon:Show() end
+        -- A real backdrop (bd.file set) can transiently fail to load right after
+        -- login — the texture streamer isn't ready yet — and Render isn't
+        -- guaranteed to run again on its own, so the dark floor would persist
+        -- until the user cycles the picker. Retry on a short timer so it
+        -- self-heals. Guarded so the "Plain" backdrop (no file) never retries,
+        -- and it stops the moment a load succeeds or the scene is hidden.
+        if bd and bd.file and backdropRetries < 12 then
+            backdropRetries = backdropRetries + 1
+            C_Timer.After(0.25, function()
+                if root and root:IsShown() and not root._hasBackdropImage then
+                    ApplyBackdropTexture(root:GetWidth(), root:GetHeight())
+                end
+            end)
+        end
     end
 end
 
@@ -466,6 +482,7 @@ local function SelectBackdrop(idx)
     if n == 0 then return end
     idx = ((idx - 1) % n) + 1
     curBackdrop = idx
+    backdropRetries = 0   -- fresh retry budget for this selection
     local bd = SCENE_BACKDROPS[idx]
     curBW, curBH = bd.w or 1024, bd.h or 682
     curBTH = bd.texh or curBH
