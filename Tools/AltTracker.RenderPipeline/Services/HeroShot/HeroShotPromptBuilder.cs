@@ -40,6 +40,7 @@ public static class HeroShotPromptBuilder
                $"{petSection}" +
                $"Background: {background} " +
                $"{styleDesc}. " +
+               "Clean heroic dark-fantasy imagery with no gore, wounds, blood, or injury. " +
                "No text, no nameplate, no UI elements, no watermarks, no floating icons.";
     }
 
@@ -119,7 +120,9 @@ public static class HeroShotPromptBuilder
             "night elf" => $"{pronoun} purple skin, long pointed ears, silver hair, and glowing eyes.",
             "draenei"   => $"{pronoun} blue skin, horns, and a tail.",
             "orc"       => $"{pronoun} green skin, prominent tusks, and a muscular build.",
-            "undead"    => $"{pronoun} decaying skeletal features, exposed bones, and tattered flesh.",
+            "undead"    => $"{pronoun} gaunt, pale blue-grey undead features with sunken cheeks and naturally " +
+                           "visible bony joints — depict as clean dark fantasy, with subtle deterioration only and " +
+                           "no gore, wounds, blood, or injury.",
             "tauren"    => $"{pronoun} bovine horns, a broad snout, and a massive muscular frame.",
             "blood elf" => $"{pronoun} golden glowing eyes, elegant features, and long pointed ears.",
             "gnome"     => $"{pronoun} a small stature, large curious eyes, and colorful hair.",
