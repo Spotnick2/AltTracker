@@ -66,6 +66,9 @@ public static class HeroShotPromptBuilder
                    "Reproduce that same framing and depth-of-field treatment. " +
                    "Use the screenshot as the reference for the character's IDENTITY ONLY: race, skin tone, facial features, " +
                    "hair and tusks, body build, and overall pose. " +
+                   "Match the head to the reference precisely, including how the hair sits with any headwear: when the " +
+                   "character wears a hat, hood, or helmet, the hair falls under or around it exactly as shown — never " +
+                   "render a mohawk, spikes, or any hairstyle poking over, above, or through the headgear. " +
                    "Do NOT rely on the screenshot to determine the appearance of armor or weapons — the character-select " +
                    "angle, lighting, and low resolution make transmog unreliable to read. " +
                    "Instead, render each equipped piece from the authoritative gear list below, matching each item's true " +
@@ -120,7 +123,7 @@ public static class HeroShotPromptBuilder
         var pronoun = gender.Equals("Male", StringComparison.OrdinalIgnoreCase) ? "He has" : "She has";
         return NormalizeRace(race) switch
         {
-            "troll"     => $"{pronoun} teal-green skin, short tusks, and a distinctive spiked mohawk hairstyle.",
+            "troll"     => $"{pronoun} teal-green skin and short tusks, with the hair styled as shown in the reference (tucked under any headwear).",
             "night elf" => $"{pronoun} purple skin, long pointed ears, silver hair, and glowing eyes.",
             "draenei"   => $"{pronoun} blue skin, horns, and a tail.",
             "orc"       => $"{pronoun} green skin, prominent tusks, and a muscular build.",
