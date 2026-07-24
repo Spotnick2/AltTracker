@@ -11,7 +11,7 @@
 --
 -- Persistence (plugin-owned; kept out of the core AltTrackerDB record):
 --   AltTrackerWarbandDB[guid] = {
---       bags = { [itemID] = count },   -- summed across bags 0..4
+--       bags = { [itemID] = count },   -- summed across bags 0..4 + the keyring (-2)
 --       bank = { [itemID] = count },   -- summed across bank -1, 5..11
 --       bagsStamp, bankStamp,          -- when each section last changed
 --       stamp = max(bagsStamp,bankStamp)  -- drives the delta watermark
@@ -26,7 +26,7 @@ AltTrackerWarbandDB = AltTrackerWarbandDB or {}
 local ADDON_ID     = "warband"
 local BLOB_VERSION = "v1"
 
-local BAG_IDS   = { 0, 1, 2, 3, 4 }
+local BAG_IDS   = { 0, 1, 2, 3, 4, -2 }   -- carried bags + the keyring (-2), so keys are findable too
 local BANK_IDS  = { -1, 5, 6, 7, 8, 9, 10, 11 }
 local MAIN_BANK = -1
 local BANK_STALE = 7 * 86400   -- flag a bank snapshot as "may be out of date" past this
@@ -183,7 +183,7 @@ local function OnBagUpdate(bag)
         if isBankOpen then ScheduleBank() end   -- bank-bag change while open
         return
     end
-    ScheduleBags()   -- bags 0..4 (or a nil/unspecified bag)
+    ScheduleBags()   -- bags 0..4 / keyring (or a nil/unspecified bag)
 end
 
 local function OnBankOpened()

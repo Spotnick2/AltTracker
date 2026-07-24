@@ -264,6 +264,19 @@ local zero = T.CountItem(12345)
 eq(zero, 0, "an item nobody holds totals zero")
 
 ------------------------------------------------------------
+-- 14. Keyring (-2) is scanned as carried inventory, so keys are findable
+------------------------------------------------------------
+WoW.now = 100000
+AltTrackerWarbandDB[GUID] = nil
+clearWorld()
+API_MODE = "struct"
+setContainer(0, 4, { [1] = { id = 100, count = 1 } })       -- a regular bag item
+setContainer(-2, 4, { [1] = { id = 13699, count = 1 } })    -- a key in the keyring
+T.ScanBags()
+eq(AltTrackerWarbandDB[GUID].bags[13699], 1, "a key in the keyring (-2) is captured by the scan")
+eq(AltTrackerWarbandDB[GUID].bags[100], 1, "a regular bag item is still captured alongside the keyring")
+
+------------------------------------------------------------
 if failures == 0 then
     print("warband tests passed: " .. testsRun)
 else
