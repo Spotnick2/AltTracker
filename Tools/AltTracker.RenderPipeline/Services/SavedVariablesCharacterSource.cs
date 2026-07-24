@@ -57,12 +57,14 @@ public sealed class SavedVariablesCharacterSource
 
             var gearIds = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             var gearLinks = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var gearNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var gearSubTypes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var slot in CharacterRecord.GearSlots)
             {
                 var id = ReadInt(t, $"gearid_{slot}");
                 var link = ReadString(t, $"gearlink_{slot}");
+                var itemName = ReadString(t, $"gearname_{slot}");
                 var subType = ReadString(t, $"gearsubtype_{slot}");
                 if (id <= 0)
                 {
@@ -70,6 +72,7 @@ public sealed class SavedVariablesCharacterSource
                 }
                 if (id > 0) gearIds[slot] = id;
                 if (!string.IsNullOrWhiteSpace(link)) gearLinks[slot] = link;
+                if (!string.IsNullOrWhiteSpace(itemName)) gearNames[slot] = itemName;
                 if (!string.IsNullOrWhiteSpace(subType)) gearSubTypes[slot] = subType;
             }
 
@@ -87,6 +90,7 @@ public sealed class SavedVariablesCharacterSource
                 LastUpdateEpoch = ReadLong(t, "lastUpdate"),
                 GearItemIds = gearIds,
                 GearLinks = gearLinks,
+                GearNames = gearNames,
                 GearSubTypes = gearSubTypes
             };
 

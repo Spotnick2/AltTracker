@@ -80,10 +80,21 @@ public static class HeroShotPromptBuilder
         return $"Subject: A heroic {raceDesc} {cls} from World of Warcraft: The Burning Crusade Classic";
     }
 
+    /// <summary>Normalizes the WoW-internal race token stored in SavedVariables (e.g. "Scourge",
+    /// "BloodElf", "NightElf") to the human-readable form the race switches key on.</summary>
+    private static string NormalizeRace(string race) =>
+        race.ToLowerInvariant() switch
+        {
+            "scourge"  => "undead",
+            "bloodelf" => "blood elf",
+            "nightelf" => "night elf",
+            var other  => other,
+        };
+
     private static string BuildRaceDescription(string race, string gender)
     {
         var g = gender.Equals("Male", StringComparison.OrdinalIgnoreCase) ? "male" : "female";
-        return race.ToLowerInvariant() switch
+        return NormalizeRace(race) switch
         {
             "troll"     => $"{g} Troll",
             "night elf" => $"{g} Night Elf",
@@ -102,7 +113,7 @@ public static class HeroShotPromptBuilder
     private static string BuildRaceDetails(string race, string gender)
     {
         var pronoun = gender.Equals("Male", StringComparison.OrdinalIgnoreCase) ? "He has" : "She has";
-        return race.ToLowerInvariant() switch
+        return NormalizeRace(race) switch
         {
             "troll"     => $"{pronoun} teal-green skin, short tusks, and a distinctive spiked mohawk hairstyle.",
             "night elf" => $"{pronoun} purple skin, long pointed ears, silver hair, and glowing eyes.",
@@ -258,6 +269,10 @@ public static class HeroShotPromptBuilder
 
     private static string TryExtractItemName(CharacterRecord character, string slot)
     {
+        // Prefer gearname_ (synced cross-account, so present on remote records where the
+        // local-only gearlink_ has been stripped). Fall back to parsing the link.
+        if (character.GearNames.TryGetValue(slot, out var name) && !string.IsNullOrWhiteSpace(name))
+            return name.Trim();
         if (!character.GearLinks.TryGetValue(slot, out var link) || string.IsNullOrWhiteSpace(link))
             return "";
         var match = ItemLinkNameRegex.Match(link);
