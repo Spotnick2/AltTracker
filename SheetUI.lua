@@ -647,55 +647,45 @@ do
         if self.uiHidden then return end
         if not (self.config and self.config.hideGameUI) then return end
         local sheet = self.sheetFrame
-        if not sheet or not UIParent or not WorldFrame then return end
+        if not sheet or not UIParent or not UIParent.GetChildren then return end
         if InCombatLockdown and InCombatLockdown() then return end
 
-        self.uiSavedParent = sheet:GetParent() or UIParent
-        self.uiSavedStrata = sheet:GetFrameStrata()
-        self.uiSavedScale  = sheet:GetScale()
-
-        local ok = pcall(function()
-            -- Keep on-screen size stable: WorldFrame renders at native scale,
-            -- UIParent is UI-scaled, so rescale by the ratio when we move over.
-            local uiEff = UIParent.GetEffectiveScale and UIParent:GetEffectiveScale() or 1
-            local wfEff = WorldFrame.GetEffectiveScale and WorldFrame:GetEffectiveScale() or 1
-            sheet:SetParent(WorldFrame)
-            sheet:SetFrameStrata("FULLSCREEN_DIALOG")
-            if wfEff and wfEff > 0 then
-                sheet:SetScale((self.uiSavedScale or 1) * (uiEff / wfEff))
+        -- Hide the game UI by hiding UIParent's direct children EXCEPT our sheet,
+        -- rather than hiding/reparenting UIParent itself. The sheet stays under
+        -- UIParent with normal strata, so its tooltips (GameTooltip and our own)
+        -- render correctly — reparenting the sheet away from UIParent flattened
+        -- the strata and drew tooltips behind the sheet's own content.
+        --
+        -- Only currently-shown frames are hidden (so GameTooltip, hidden at rest,
+        -- is left alone and still pops on demand), and only out of combat (Enter
+        -- bails in combat) so hiding secure frames can't taint. Frames whose
+        -- Show() is later blocked in combat are retried on PLAYER_REGEN_ENABLED.
+        self.hiddenFrames = {}
+        for _, child in ipairs({ UIParent:GetChildren() }) do
+            if child ~= sheet and child.IsShown and child:IsShown() and child.Hide then
+                if pcall(child.Hide, child) then
+                    self.hiddenFrames[#self.hiddenFrames + 1] = child
+                end
             end
-            -- Hide via UIParent:Hide() rather than SetUIVisibility(false): the
-            -- latter enters the game's "UI hidden" state where the FIRST Esc only
-            -- restores the UI (forcing a second Esc to actually close the sheet).
-            -- UIParent:Hide() keeps IsUIVisible() true, so Esc closes the sheet
-            -- directly and our Exit restores the UI — one press. Toggling the
-            -- parent's visibility doesn't taint its secure children, and our
-            -- WorldFrame-reparented sheet stays visible through it.
-            UIParent:Hide()
-        end)
-        if ok then
-            self.uiHidden = true
-        else
-            self:RestoreGameUI()   -- roll back any half-applied state
         end
+        self.uiHidden = true
     end
 
     function AltTrackerCameraPresentation:RestoreGameUI()
-        if not self.uiHidden and not self.uiSavedParent then return end
-        local sheet = self.sheetFrame
-        self.uiHidden = false   -- clear BEFORE UIParent:Show() so our own restore
-                                -- doesn't re-enter through the Esc OnShow hook below
-        pcall(function()
-            if UIParent and UIParent.Show then UIParent:Show() end
-            if sheet then
-                sheet:SetParent(self.uiSavedParent or UIParent)
-                if self.uiSavedScale  then sheet:SetScale(self.uiSavedScale) end
-                if self.uiSavedStrata then sheet:SetFrameStrata(self.uiSavedStrata) end
+        if not self.hiddenFrames then
+            self.uiHidden = false
+            return
+        end
+        local stillHidden
+        for _, child in ipairs(self.hiddenFrames) do
+            pcall(child.Show, child)
+            if child.IsShown and not child:IsShown() then
+                stillHidden = stillHidden or {}
+                stillHidden[#stillHidden + 1] = child   -- Show() blocked (in combat) — retry after
             end
-        end)
-        self.uiSavedParent = nil
-        self.uiSavedScale  = nil
-        self.uiSavedStrata = nil
+        end
+        self.hiddenFrames = stillHidden          -- nil once everything is restored
+        self.uiHidden = stillHidden ~= nil
     end
 
     AltTrackerCameraPresentation.animFrame = CreateFrame("Frame")
@@ -706,27 +696,20 @@ do
 
     AltTrackerCameraPresentation.eventFrame = CreateFrame("Frame")
     AltTrackerCameraPresentation.eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
+    AltTrackerCameraPresentation.eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
     AltTrackerCameraPresentation.eventFrame:RegisterEvent("PLAYER_LOGOUT")
     AltTrackerCameraPresentation.eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
     AltTrackerCameraPresentation.eventFrame:SetScript("OnEvent", function(_, event)
-        if AltTrackerCameraPresentation.active then
-            AltTrackerCameraPresentation:ForceRestore(event)
+        local p = AltTrackerCameraPresentation
+        if event == "PLAYER_REGEN_ENABLED" then
+            -- Combat ended: re-show any UI frames whose Show() was blocked in combat.
+            if p.hiddenFrames then p:RestoreGameUI() end
+            return
+        end
+        if p.active then
+            p:ForceRestore(event)
         end
     end)
-
-    -- Esc while the game UI is hidden: the engine restores UIParent on the FIRST
-    -- Esc (consuming it), so the sheet would need a second Esc to close. Hook
-    -- UIParent's show — if it becomes visible while we still hold it "hidden", the
-    -- user pressed Esc, so finish teardown by closing the sheet. RestoreGameUI
-    -- clears uiHidden BEFORE its own UIParent:Show(), so this never self-triggers.
-    if UIParent and type(UIParent.HookScript) == "function" then
-        UIParent:HookScript("OnShow", function()
-            local p = AltTrackerCameraPresentation
-            if p and p.uiHidden and p.sheetFrame and p.sheetFrame:IsShown() then
-                p.sheetFrame:Hide()   -- OnHide -> Exit -> RestoreGameUI (reparent back)
-            end
-        end)
-    end
 
     -- Suppress the engine-level "Are you sure you want to enable this
     -- experimental feature?" popup. Default Blizzard UI registers
@@ -1785,22 +1768,25 @@ local function CreateFrameIfNeeded()
         end
 
         local function doCapture()
-            -- Center the character (the presentation shifts it aside for this
-            -- window) and hide nameplates (they survive UIParent:Hide).
-            setcv("test_cameraOverShoulder", 0)
+            -- Nameplates survive UIParent:Hide, so always hide them for the shot.
             setcv("nameplateShowEnemies", 0)
             setcv("nameplateShowFriends", 0)
             setcv("nameplateShowAll", 0)
 
-            -- Zoom out to a full-body distance (the presentation uses a tight
-            -- showcase zoom that clips heads/feet for a portrait reference).
+            -- Auto-frame (default): center the character (the presentation shifts
+            -- it aside for this window) and zoom out to full-body. When
+            -- AltTrackerConfig.refCaptureUseCurrentView is set, skip both and
+            -- capture the camera exactly as the player has framed it.
             local savedZoom
-            if type(GetCameraZoom) == "function" then
-                savedZoom = GetCameraZoom()
-                local target = tonumber(AltTrackerConfig and AltTrackerConfig.refCaptureZoom) or 6.5
-                local delta = target - (savedZoom or 0)
-                if delta > 0.05 and type(CameraZoomOut) == "function" then pcall(CameraZoomOut, delta)
-                elseif delta < -0.05 and type(CameraZoomIn) == "function" then pcall(CameraZoomIn, -delta) end
+            if not (AltTrackerConfig and AltTrackerConfig.refCaptureUseCurrentView) then
+                setcv("test_cameraOverShoulder", 0)
+                if type(GetCameraZoom) == "function" then
+                    savedZoom = GetCameraZoom()
+                    local target = tonumber(AltTrackerConfig and AltTrackerConfig.refCaptureZoom) or 6.5
+                    local delta = target - (savedZoom or 0)
+                    if delta > 0.05 and type(CameraZoomOut) == "function" then pcall(CameraZoomOut, delta)
+                    elseif delta < -0.05 and type(CameraZoomIn) == "function" then pcall(CameraZoomIn, -delta) end
+                end
             end
 
             frame:SetAlpha(0)   -- hide the window without triggering OnHide/Exit
@@ -1849,17 +1835,32 @@ local function CreateFrameIfNeeded()
     refIcon:SetPoint("CENTER")
     refIcon:SetSize(13, 13)
     refIcon:SetTexture("Interface\\ICONS\\INV_Misc_Spyglass_02")
+    -- Custom tooltip: GameTooltip lives under UIParent, which the presentation
+    -- hides, so it would never render on hover. Parent our own to the sheet.
+    local refTip = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+    refTip:SetFrameStrata("TOOLTIP")
+    refTip:SetToplevel(true)
+    refTip:SetFrameLevel(200)
+    refTip:SetPoint("TOPRIGHT", refBtn, "BOTTOMRIGHT", 0, -5)
+    refTip:SetSize(258, 62)
+    AltTracker.ApplyBackdrop(refTip, 0.05, 0.05, 0.05, 0.96)
+    local refTipText = refTip:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    refTipText:SetPoint("TOPLEFT", 9, -8)
+    refTipText:SetPoint("BOTTOMRIGHT", -9, 8)
+    refTipText:SetJustifyH("LEFT"); refTipText:SetJustifyV("TOP")
+    refTipText:SetText("|cffffffffUpdate reference|r\n|cffbbbbbbClean screenshot of this character for its AI " ..
+        "portrait — draws the weapon, hides the UI, frames full-body. |r|cffffff00/reload|r|cffbbbbbb after to save it.|r")
+    refTip:Hide()
+
     refBtn:SetScript("OnClick", CaptureReferenceFromSheet)
     refBtn:SetScript("OnEnter", function()
         refBtn:SetBackdropColor(0.22, 0.22, 0.22, 1)
-        GameTooltip:SetOwner(refBtn, "ANCHOR_BOTTOMLEFT")
-        GameTooltip:AddLine("Update reference")
-        GameTooltip:AddLine("Take a clean screenshot of this character for its AI portrait. |cffffff00/reload|r afterward to save it.", 0.8, 0.8, 0.8, true)
-        GameTooltip:Show()
+        refTip:Show()
+        refTip:Raise()
     end)
     refBtn:SetScript("OnLeave", function()
         refBtn:SetBackdropColor(0.12, 0.12, 0.12, 1)
-        GameTooltip:Hide()
+        refTip:Hide()
     end)
 
     --------------------------------------------------------
