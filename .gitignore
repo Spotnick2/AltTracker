@@ -1,3 +1,6 @@
 # .NET build output (Tools/AltTracker.RenderPipeline and any other C# tools)
 [Bb]in/
 [Oo]bj/
+
+# Packaged share zips (built by staging the deployable addon folders)
+dist/
