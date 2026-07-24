@@ -636,26 +636,57 @@ do
     end
 
     -- ── Optional game-UI hide (Narcissus-style clean showcase) ──────────────
-    -- Reparents the AltTracker sheet out from under UIParent, then hides
-    -- UIParent so the game UI and other addons vanish while the 3D character
-    -- (WorldFrame) and the sheet stay visible.
+    -- Uses the engine's own SetUIVisibility(false) — the same call Alt+Z makes —
+    -- to hide the ENTIRE UI (Blizzard frames, unit frames, and driver-controlled
+    -- addon windows like Details! that a per-frame :Hide() can't suppress, since
+    -- they re-show themselves). The 3D character (WorldFrame) stays visible.
     --
-    -- Combat-safe: toggling UIParent's own visibility does NOT taint its secure
-    -- children (unlike hiding action bars individually), and SetParent on our
-    -- non-secure sheet is allowed in combat. HideGameUI bails in combat; every
-    -- restore path (Exit + ForceRestore on combat/logout/reload) calls
-    -- RestoreGameUI, so the UI can never stay stuck hidden.
+    -- SetUIVisibility hides everything under UIParent, so we first lift the sheet
+    -- AND GameTooltip out from under UIParent (SetParent(nil)) — exactly what
+    -- Narcissus's TakeOutFromUIParent does. Reparented frames are siblings of
+    -- UIParent, untouched by the engine hide, so the sheet stays up. Lifting
+    -- GameTooltip too (not just the sheet) is what makes the ~100 existing
+    -- GameTooltip:SetOwner/AddLine callsites keep working — an earlier attempt
+    -- moved only the sheet, leaving GameTooltip stranded in the hidden UIParent
+    -- so its tooltips vanished. Strata is set so GameTooltip (TOOLTIP) draws
+    -- above the sheet (DIALOG).
+    --
+    -- Combat-safe: SetUIVisibility is what Alt+Z uses and is callable in combat;
+    -- SetParent/SetScale on our NON-secure sheet + GameTooltip is allowed in
+    -- combat. HideGameUI bails on entry in combat (Enter does too); every restore
+    -- path (Exit + ForceRestore on combat/logout/reload) calls RestoreGameUI, so
+    -- the UI can never stay stuck hidden.
+
+    -- Lift a frame out from under UIParent (state=true) or put it back (false),
+    -- compensating scale so its on-screen size is unchanged either way.
+    function AltTrackerCameraPresentation:_TakeOut(frame, strata, state)
+        if not frame then return end
+        if state then
+            frame._atSavedStrata = frame:GetFrameStrata()
+            frame._atSavedScale  = frame:GetScale()
+            local eff = frame:GetEffectiveScale()          -- capture while still parented
+            pcall(frame.SetParent, frame, nil)
+            if strata then pcall(frame.SetFrameStrata, frame, strata) end
+            pcall(frame.SetScale, frame, eff)              -- keep the same apparent size
+        else
+            pcall(frame.SetParent, frame, UIParent)
+            pcall(frame.SetScale, frame, frame._atSavedScale or 1)
+            if frame._atSavedStrata then pcall(frame.SetFrameStrata, frame, frame._atSavedStrata) end
+        end
+    end
+
     function AltTrackerCameraPresentation:HideGameUI()
         if self.uiHidden then return end
         if not (self.config and self.config.hideGameUI) then return end
         local sheet = self.sheetFrame
-        if not sheet or not UIParent or not UIParent.GetChildren then return end
+        if not sheet then return end
         if InCombatLockdown and InCombatLockdown() then return end
+        if type(SetUIVisibility) ~= "function" then return end   -- no engine support: skip cleanly
 
         -- Close any open chat edit box first. If we were opened by typing "/alts"
-        -- in chat, its edit box is still mid-input; hiding the chat frame in that
-        -- state and restoring it later resurrects a half-focused, un-closable
-        -- /say box. Deactivating it now means restore brings nothing back.
+        -- in chat, its edit box is still mid-input; hiding the UI in that state
+        -- and restoring it later resurrects a half-focused, un-closable /say box.
+        -- Deactivating it now means restore brings nothing back.
         for i = 1, (NUM_CHAT_WINDOWS or 10) do
             local eb = _G["ChatFrame" .. i .. "EditBox"]
             if eb and eb.IsShown and eb:IsShown() then
@@ -668,50 +699,20 @@ do
             end
         end
 
-        -- Hide the game UI by hiding UIParent's direct children EXCEPT our sheet,
-        -- rather than hiding/reparenting UIParent itself. The sheet stays under
-        -- UIParent with normal strata, so its tooltips (GameTooltip and our own)
-        -- render correctly — reparenting the sheet away from UIParent flattened
-        -- the strata and drew tooltips behind the sheet's own content.
-        --
-        -- Only currently-shown frames are hidden (so GameTooltip, hidden at rest,
-        -- is left alone and still pops on demand), and only out of combat (Enter
-        -- bails in combat) so hiding secure frames can't taint. Frames whose
-        -- Show() is later blocked in combat are retried on PLAYER_REGEN_ENABLED.
-        self.hiddenFrames = {}
-        for _, child in ipairs({ UIParent:GetChildren() }) do
-            if child ~= sheet then
-                -- Some UIParent children are FORBIDDEN frames (the in-game shop,
-                -- etc.); calling any method on them errors ("bad self"), which
-                -- would abort the whole hide. Guard every access with pcall and
-                -- skip forbidden frames.
-                local ok, shown = pcall(function()
-                    if child.IsForbidden and child:IsForbidden() then return false end
-                    return child.IsShown and child:IsShown() and child.Hide ~= nil
-                end)
-                if ok and shown and pcall(child.Hide, child) then
-                    self.hiddenFrames[#self.hiddenFrames + 1] = child
-                end
-            end
-        end
+        self:_TakeOut(sheet, "DIALOG", true)
+        self:_TakeOut(GameTooltip, "TOOLTIP", true)
+        pcall(SetUIVisibility, false)
         self.uiHidden = true
     end
 
     function AltTrackerCameraPresentation:RestoreGameUI()
-        if not self.hiddenFrames then
-            self.uiHidden = false
-            return
-        end
-        local stillHidden
-        for _, child in ipairs(self.hiddenFrames) do
-            pcall(child.Show, child)
-            if child.IsShown and not child:IsShown() then
-                stillHidden = stillHidden or {}
-                stillHidden[#stillHidden + 1] = child   -- Show() blocked (in combat) — retry after
-            end
-        end
-        self.hiddenFrames = stillHidden          -- nil once everything is restored
-        self.uiHidden = stillHidden ~= nil
+        if not self.uiHidden then return end
+        -- Clear the flag BEFORE re-showing the UI so the SetUIVisibility hook
+        -- below sees us as already-restoring and doesn't recursively close.
+        self.uiHidden = false
+        if type(SetUIVisibility) == "function" then pcall(SetUIVisibility, true) end
+        self:_TakeOut(self.sheetFrame, nil, false)
+        self:_TakeOut(GameTooltip, nil, false)
     end
 
     AltTrackerCameraPresentation.animFrame = CreateFrame("Frame")
@@ -728,14 +729,31 @@ do
     AltTrackerCameraPresentation.eventFrame:SetScript("OnEvent", function(_, event)
         local p = AltTrackerCameraPresentation
         if event == "PLAYER_REGEN_ENABLED" then
-            -- Combat ended: re-show any UI frames whose Show() was blocked in combat.
-            if p.hiddenFrames then p:RestoreGameUI() end
+            -- Combat ended: nothing to retry (combat START ForceRestores the
+            -- showcase, so uiHidden is already false by now). Guarded restore
+            -- is a cheap belt-and-suspenders in case a hide outlived combat.
+            if p.uiHidden then p:RestoreGameUI() end
             return
         end
         if p.active then
             p:ForceRestore(event)
         end
     end)
+
+    -- ESC (or Alt+Z) while our showcase is up: the engine un-hides the UI by
+    -- calling SetUIVisibility(true). That's the same "two-ESC" hazard whole-UI
+    -- hiding always had — first press un-hides, the sheet stays open. Catch that
+    -- re-show here and close the sheet so a single ESC does the whole thing. Our
+    -- own RestoreGameUI clears uiHidden BEFORE it re-shows, so this no-ops on the
+    -- normal-close path (Narcissus hooks SetUIVisibility the same way).
+    if type(hooksecurefunc) == "function" and type(SetUIVisibility) == "function" then
+        hooksecurefunc("SetUIVisibility", function(state)
+            local p = AltTrackerCameraPresentation
+            if state and p.uiHidden and p.sheetFrame and p.sheetFrame:IsShown() then
+                p.sheetFrame:Hide()   -- OnHide -> Exit -> RestoreGameUI (full restore)
+            end
+        end)
+    end
 
     -- Suppress the engine-level "Are you sure you want to enable this
     -- experimental feature?" popup. Default Blizzard UI registers
@@ -1820,19 +1838,24 @@ local function CreateFrameIfNeeded()
 
             frame:SetAlpha(0)
             C_Timer.After(1.3, function()   -- let the weapon draw + zoom + recenter settle
-                -- Full UI blackout for the shot itself. UIParent:Hide() hides ALL
-                -- UI, including driver-controlled addon frames (unit frames, DPS
-                -- meters) that the presentation's per-frame hide can't suppress, so
-                -- the reference is spotless. `capturing` stops the sheet's OnHide
-                -- (fired by hiding UIParent) from tearing the showcase down via Exit,
-                -- and stops OnShow from re-running Enter when we bring UIParent back.
+                -- Blackout for the shot. When the showcase is active the engine has
+                -- ALREADY hidden the whole UI via SetUIVisibility(false), so the
+                -- sheet (now alpha 0) is the only thing left to hide — don't touch
+                -- UIParent, or UIParent:Show() below would un-hide all the clutter
+                -- mid-showcase. When the showcase is OFF (hideGameUI disabled), we
+                -- own the blackout: UIParent:Hide() hides ALL UI, including driver-
+                -- controlled frames (unit frames, DPS meters), so the shot is still
+                -- spotless. `capturing` stops the sheet's OnHide (fired by hiding
+                -- UIParent) from tearing the showcase down, and stops OnShow from
+                -- re-running Enter when we bring UIParent back.
                 AltTrackerCameraPresentation.capturing = true
-                if UIParent and UIParent.Hide then UIParent:Hide() end
+                local ownBlackout = not AltTrackerCameraPresentation.uiHidden
+                if ownBlackout and UIParent and UIParent.Hide then UIParent:Hide() end
                 C_Timer.After(0.1, function()
                     char.refshot_ts = time()
                     Screenshot()
                     C_Timer.After(0.5, function()
-                        if UIParent and UIParent.Show then UIParent:Show() end
+                        if ownBlackout and UIParent and UIParent.Show then UIParent:Show() end
                         AltTrackerCameraPresentation.capturing = false
                         frame:SetAlpha(1)
                         if type(SetCVar) == "function" then
@@ -1876,8 +1899,10 @@ local function CreateFrameIfNeeded()
     refIcon:SetPoint("CENTER")
     refIcon:SetSize(13, 13)
     refIcon:SetTexture("Interface\\ICONS\\INV_Misc_Spyglass_02")
-    -- Custom tooltip: GameTooltip lives under UIParent, which the presentation
-    -- hides, so it would never render on hover. Parent our own to the sheet.
+    -- Custom richer tooltip, parented to the sheet so it rides along when the
+    -- presentation lifts the sheet out from under UIParent. (GameTooltip is also
+    -- lifted during the showcase, so it would work too, but this one is a purpose
+    -- built multi-line panel.)
     local refTip = CreateFrame("Frame", nil, frame, "BackdropTemplate")
     refTip:SetFrameStrata("TOOLTIP")
     refTip:SetToplevel(true)
