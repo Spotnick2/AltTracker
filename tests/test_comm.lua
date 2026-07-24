@@ -704,6 +704,65 @@ check(AltTrackerDB[sguid]["si_Gruul's Lair@1"] == nil, "a lockout no longer save
 eq(AltTrackerDB[sguid]["si_Karazhan@1"], "103560|8|11|10|Normal", "boss-progress change is captured (7/11 -> 8/11)")
 
 ------------------------------------------------------------
+-- 33. Mail with expiry: ScanMail writes syncable mail_ fields
+------------------------------------------------------------
+WoW.reset(); WoW.now = 100000
+local mguid = UnitGUID("player")   -- "Player-TEST-0001"
+AltTrackerDB = { [mguid] = { guid = mguid, name = "Mailer", lastUpdate = 0 } }
+AltTrackerConfig = { peerWatermarks = {} }
+
+local inbox = {}
+_G.GetInboxNumItems = function() return #inbox end
+_G.GetInboxHeaderInfo = function(i)
+    local e = inbox[i]
+    if not e then return end
+    -- packageIcon, stationeryIcon, sender, subject, money, CODAmount, daysLeft, itemCount
+    return nil, nil, "Sender", "Subj", e.money or 0, 0, e.daysLeft, e.itemCount or 0
+end
+
+inbox = {
+    { daysLeft = 3,  itemCount = 2, money = 0 },      -- items, ~3 days: this is the soonest
+    { daysLeft = 10, itemCount = 0, money = 5000 },   -- gold only: still "has stuff"
+    { daysLeft = 5,  itemCount = 0, money = 0 },       -- plain letter, nothing to lose: ignored
+}
+T.ScanMail()
+local mrec = AltTrackerDB[mguid]
+eq(mrec.mail_count, 2, "mail: only mails with items or money are counted (plain letter ignored)")
+eq(mrec.mail_expiry, math.floor((100000 + 3 * 86400) / 60) * 60, "mail: soonest expiry stored absolute, rounded to the minute")
+eq(mrec.mail_money, 5000, "mail: total attached money summed")
+
+local mPayload = T.SerializeFullDB(false, 0)
+check(mPayload:find("mail_expiry:" .. tostring(mrec.mail_expiry), 1, true), "mail_ summary serializes into the char record for sync")
+
+-- Reconcile: an emptied mailbox clears the mail_ fields.
+inbox = {}
+T.ScanMail()
+check(AltTrackerDB[mguid].mail_count == nil and AltTrackerDB[mguid].mail_expiry == nil,
+      "mail: emptying the mailbox clears the mail_ summary")
+
+------------------------------------------------------------
+-- 34. Mail alerts: login warning respects window + toggle
+------------------------------------------------------------
+WoW.reset(); WoW.now = 100000
+AltTrackerDB = {
+    ["g-soon"] = { guid = "g-soon", name = "Expiro", class = "MAGE",   mail_expiry = 100000 + 2 * 86400, mail_count = 1 },
+    ["g-far"]  = { guid = "g-far",  name = "Patient", class = "PRIEST", mail_expiry = 100000 + 20 * 86400, mail_count = 3 },
+    ["g-past"] = { guid = "g-past", name = "Toolate", class = "ROGUE",  mail_expiry = 100000 - 100,          mail_count = 1 },
+    ["g-none"] = { guid = "g-none", name = "Empty",   class = "WARLOCK" },
+}
+AltTrackerConfig = { mailAlertsEnabled = true }
+T.CheckMailAlerts()
+check(chatHas("Mail expiring soon"), "mail alerts: header printed when an alt has mail expiring within the window")
+check(chatHas("Expiro"), "mail alerts: an alt within the window is listed")
+check(not chatHas("Patient"), "mail alerts: an alt outside the window is not listed")
+check(not chatHas("Toolate"), "mail alerts: already-expired mail is not listed")
+
+WoW.reset()
+AltTrackerConfig = { mailAlertsEnabled = false }
+T.CheckMailAlerts()
+check(not chatHas("Mail expiring soon"), "mail alerts: disabling the toggle suppresses the warning")
+
+------------------------------------------------------------
 -- Summary
 ------------------------------------------------------------
 

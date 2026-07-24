@@ -2373,6 +2373,19 @@ local function CreateFrameIfNeeded()
 
     Y = Y - 12
 
+    -- ── Mail section ──────────────────────────────────────
+    local optMailHdr = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    optMailHdr:SetPoint("TOPLEFT", P, Y)
+    optMailHdr:SetText("MAIL")
+    optMailHdr:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+    Y = Y - 22
+
+    local optMailAlertsCheck = MakeOptCheckRow("mailAlertsEnabled",
+        "Warn at login about mail expiring soon", Y)
+    Y = Y - 22
+
+    Y = Y - 12
+
     -- ── Helper text ───────────────────────────────────────
     local optHint = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     optHint:SetPoint("TOPLEFT", P, Y)
@@ -2407,6 +2420,7 @@ local function CreateFrameIfNeeded()
         optAcctBox:SetText(tostring(AltTrackerConfig.accountNumber or ""))
         optSendAllCheck:SetChecked(AltTrackerConfig.sendAllAccounts and true or false)
         optToastsCheck:SetChecked(AltTrackerConfig.toastsEnabled ~= false)
+        optMailAlertsCheck:SetChecked(AltTrackerConfig.mailAlertsEnabled ~= false)
         AltTrackerConfig.toastProfessions = AltTrackerConfig.toastProfessions or {}
         for profKey, cb in pairs(optProfChecks) do
             cb:SetChecked(AltTrackerConfig.toastProfessions[profKey] ~= false)

@@ -30,6 +30,9 @@ local function EnsureDefaults()
     if AltTrackerConfig.toastsEnabled == nil then
         AltTrackerConfig.toastsEnabled = true
     end
+    if AltTrackerConfig.mailAlertsEnabled == nil then
+        AltTrackerConfig.mailAlertsEnabled = true
+    end
     if not AltTrackerConfig.toastProfessions then
         AltTrackerConfig.toastProfessions = {
             Tailoring     = true,

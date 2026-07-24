@@ -428,7 +428,8 @@ local function ClearSyncedStateFields(t)
         or k:find("^gearname_") or k:find("^gearid_")
         or k:find("^gearlink_") or k:find("^gearsubtype_")  -- both local-only (see note above)
         or k:find("^cd_") or k:find("^known_")   -- craft cooldowns (dynamic cd_<prof>@<label>) + legacy known_ flags
-        or k:find("^si_") then                   -- saved raid lockouts (si_<name>@<diff>)
+        or k:find("^si_")                        -- saved raid lockouts (si_<name>@<diff>)
+        or k:find("^mail_") then                 -- mail summary (mail_count / mail_expiry / mail_money)
             t[k] = nil
         end
     end
@@ -1010,6 +1011,101 @@ AltTracker.ScanSavedInstances = ScanSavedInstances
 -- and when the sheet opens.
 AltTracker.RequestLockouts = function() if RequestRaidInfo then RequestRaidInfo() end end
 
+------------------------------------------------------------
+-- Mail with expiry (P2)
+--
+-- Mail is only readable while a mailbox is open, so we scan on
+-- MAIL_INBOX_UPDATE and snapshot a tiny synced summary onto the character
+-- record: how many mails carry something to lose (items or money), the
+-- soonest expiry, and the total money. `daysLeft` from GetInboxHeaderInfo
+-- gives the client's own remaining lifetime, so we don't have to model the
+-- 30-day / 3-day (returned/COD) rules ourselves. Expiry is stored absolute
+-- and rounded to the minute — same trick as lockouts: a later re-scan reports
+-- the same moment via a smaller daysLeft, so now+daysLeft is stable and won't
+-- churn the delta sync every time a mailbox is opened.
+--
+-- Caveat: data is only as fresh as each alt's last mailbox visit — inherent
+-- to the API (there's no background mail poll). CheckMailAlerts is login-only.
+------------------------------------------------------------
+local MAIL_ALERT_DAYS = 7   -- warn on login about mail expiring within this window
+
+local function ScanMail()
+    local guid = UnitGUID("player")
+    local char = guid and AltTrackerDB and AltTrackerDB[guid]
+    if not char or not GetInboxNumItems or not GetInboxHeaderInfo then return end
+
+    local now = time()
+    local count, money, soonest = 0, 0, nil
+    for i = 1, GetInboxNumItems() do
+        local _, _, _, _, mMoney, _, daysLeft, itemCount = GetInboxHeaderInfo(i)
+        -- Only mail with something to lose (attachments or gold) is worth tracking.
+        local hasStuff = (itemCount and itemCount > 0) or (mMoney and mMoney > 0)
+        if hasStuff and daysLeft and daysLeft > 0 then
+            count = count + 1
+            money = money + (mMoney or 0)
+            local expiresAt = math.floor((now + daysLeft * 86400) / 60) * 60
+            if not soonest or expiresAt < soonest then soonest = expiresAt end
+        end
+    end
+
+    local changed = false
+    local function set(k, v)
+        if char[k] ~= v then char[k] = v; changed = true end
+    end
+    if count > 0 then
+        set("mail_count",  count)
+        set("mail_expiry", soonest)
+        set("mail_money",  money)
+    else
+        for _, k in ipairs({ "mail_count", "mail_expiry", "mail_money" }) do
+            if char[k] ~= nil then char[k] = nil; changed = true end
+        end
+    end
+    if changed then
+        char.lastUpdate = time()
+        if AltTracker.RefreshSheet then AltTracker.RefreshSheet() end
+    end
+end
+AltTracker.ScanMail = ScanMail
+
+-- Login notification: one line per alt whose mail expires within
+-- MAIL_ALERT_DAYS, soonest first. Reads persisted/synced data (no mailbox
+-- needed) and is gated by AltTrackerConfig.mailAlertsEnabled.
+local function CheckMailAlerts()
+    if not AltTrackerConfig or AltTrackerConfig.mailAlertsEnabled == false then return end
+    if not AltTrackerDB then return end
+
+    local now = time()
+    local threshold = now + MAIL_ALERT_DAYS * 86400
+    local alerts = {}
+    for _, c in pairs(AltTrackerDB) do
+        local exp = tonumber(c.mail_expiry)
+        if exp and exp > now and exp <= threshold then
+            alerts[#alerts + 1] = { name = c.name or "?", class = c.class,
+                                    exp = exp, count = tonumber(c.mail_count) or 0 }
+        end
+    end
+    if #alerts == 0 then return end
+    table.sort(alerts, function(a, b) return a.exp < b.exp end)
+
+    Print("|cffffcc00Mail expiring soon:|r")
+    for _, a in ipairs(alerts) do
+        local left = a.exp - now
+        local when
+        if left >= 86400 then
+            when = math.floor(left / 86400) .. "d"
+        elseif left >= 3600 then
+            when = math.floor(left / 3600) .. "h"
+        else
+            when = math.max(1, math.floor(left / 60)) .. "m"
+        end
+        local color = (AltTracker.ClassColor and AltTracker.ClassColor(a.class)) or "|cffffffff"
+        Print(string.format("  %s%s|r — %d mail, expires in %s",
+            color, a.name, a.count, when))
+    end
+end
+AltTracker.CheckMailAlerts = CheckMailAlerts
+
 local frame = CreateFrame("Frame")
 
 frame:RegisterEvent("PLAYER_LOGIN")
@@ -1020,6 +1116,7 @@ frame:RegisterEvent("PLAYER_MONEY")
 frame:RegisterEvent("PLAYER_UPDATE_RESTING")
 frame:RegisterEvent("PLAYER_XP_UPDATE")
 frame:RegisterEvent("UPDATE_INSTANCE_INFO")   -- saved raid lockouts
+frame:RegisterEvent("MAIL_INBOX_UPDATE")      -- mail with expiry
 frame:RegisterEvent("CHAT_MSG_SYSTEM")    -- detect peer "X has come online" notifications
 
 C_ChatInfo.RegisterAddonMessagePrefix(PREFIX)
@@ -1032,6 +1129,11 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
     if event == "UPDATE_INSTANCE_INFO" then
         ScanSavedInstances()
+        return
+    end
+
+    if event == "MAIL_INBOX_UPDATE" then
+        ScanMail()
         return
     end
 
@@ -1271,6 +1373,12 @@ frame:SetScript("OnEvent", function(self, event, ...)
                 end
             end
 
+        end)
+
+        -- Mail-expiry warnings, a beat after the sync banner so they land
+        -- below the login noise. Reads persisted/synced data — no mailbox needed.
+        C_Timer.After(4, function()
+            if AltTracker.CheckMailAlerts then AltTracker.CheckMailAlerts() end
         end)
 
     end
@@ -1709,6 +1817,8 @@ AltTracker._test = {
     RequestCharacters   = RequestCharacters,
     GetPeerWatermark    = GetPeerWatermark,
     ScanSavedInstances  = ScanSavedInstances,
+    ScanMail            = ScanMail,
+    CheckMailAlerts     = CheckMailAlerts,
     WatchSyncPeer       = WatchSyncPeer,
     CheckSyncWatch      = CheckSyncWatch,
     NoteSyncActivity    = NoteSyncActivity,
