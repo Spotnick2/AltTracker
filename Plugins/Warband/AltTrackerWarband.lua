@@ -348,45 +348,102 @@ local function DupName(holders, name)
     return c > 1
 end
 
--- Append the cross-alt breakdown: the real item tooltip (via SetHyperlink) plus
--- one line per character PER LOCATION (bags/bank separate), Altoholic-style.
-local function AppendBreakdown(tt, e)
-    tt:AddLine(" ")
-    tt:AddDoubleLine("Across alts", tostring(e.total), 0.7, 0.7, 0.7, 1, 1, 1)
+local BAG_ICON  = "|TInterface\\Icons\\INV_Misc_Bag_08:12:12:0:0|t"
+local BANK_ICON = "|TInterface\\Minimap\\Tracking\\Banker:13:13:0:0|t"
 
-    local holders = {}
-    for _, h in ipairs(e.holders or {}) do holders[#holders + 1] = h end
-    table.sort(holders, function(a, b2) return (a.name or "") < (b2.name or "") end)
+-- Inline class-icon texture escape for a tooltip line (empty if unknown).
+local function ClassIconMarkup(class)
+    local t = CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[class]
+    if not t then return "" end
+    return string.format(
+        "|TInterface\\TargetingFrame\\UI-Classes-Circles:14:14:0:0:256:256:%d:%d:%d:%d|t ",
+        math.floor(t[1] * 256), math.floor(t[2] * 256),
+        math.floor(t[3] * 256), math.floor(t[4] * 256))
+end
 
-    local now = time()
-    for _, h in ipairs(holders) do
-        local cc = (h.class and RAID_CLASS_COLORS and RAID_CLASS_COLORS[h.class]) or { r = .9, g = .9, b = .9 }
-        local nm = h.name or "?"
-        if h.realm and DupName(e.holders, h.name) then nm = nm .. "-" .. h.realm end
-        if (h.bags or 0) > 0 then
-            tt:AddDoubleLine(nm .. "  |cff888888Bags|r", tostring(h.bags), cc.r, cc.g, cc.b, .9, .9, .9)
-        end
-        if (h.bank or 0) > 0 then
-            local old = h.bankStamp and (now - h.bankStamp) > BANK_STALE
-            tt:AddDoubleLine(nm .. "  |cff888888Bank" .. (old and " (old)" or "") .. "|r",
-                             tostring(h.bank), cc.r, cc.g, cc.b, .9, .9, .9)
+-- Sum one itemID across every tracked character's bags+bank (for the global
+-- item-tooltip hook). Returns total + a holders list shaped like gather()'s.
+local function CountItem(itemID)
+    local total, holders = 0, {}
+    for guid, c in pairs(AltTrackerDB or {}) do
+        if type(c) == "table" and c.name then
+            local wb = AltTrackerWarbandDB[guid]
+            if type(wb) == "table" then
+                local bags = (wb.bags and wb.bags[itemID]) or 0
+                local bank = (wb.bank and wb.bank[itemID]) or 0
+                if bags + bank > 0 then
+                    total = total + bags + bank
+                    holders[#holders + 1] = {
+                        name = c.name, class = c.class, realm = c.realm,
+                        bags = bags, bank = bank, bankStamp = wb.bankStamp,
+                    }
+                end
+            end
         end
     end
+    return total, holders
+end
+AT_WB.CountItem = CountItem
+
+-- The cross-alt breakdown block: "Total: N", then one line per character —
+-- class icon + class-coloured name on the left, the per-location counts with
+-- inline bag/bank icons on the right (e.g. "17[bag] +46[bank]").
+local function AppendBreakdown(tt, total, holders)
+    if not total or total <= 0 or not holders or #holders == 0 then return end
+    tt:AddLine(" ")
+    tt:AddDoubleLine("Total:", tostring(total), 1, 0.82, 0, 1, 1, 1)
+
+    local list = {}
+    for _, h in ipairs(holders) do list[#list + 1] = h end
+    table.sort(list, function(a, b) return (a.name or "") < (b.name or "") end)
+
+    local now, stale = time(), false
+    for _, h in ipairs(list) do
+        local cc = (h.class and RAID_CLASS_COLORS and RAID_CLASS_COLORS[h.class]) or { r = .9, g = .9, b = .9 }
+        local nm = ClassIconMarkup(h.class) .. (h.name or "?")
+        if h.realm and DupName(list, h.name) then nm = nm .. "-" .. h.realm end
+        local parts = {}
+        if (h.bags or 0) > 0 then parts[#parts + 1] = h.bags .. BAG_ICON end
+        if (h.bank or 0) > 0 then
+            parts[#parts + 1] = h.bank .. BANK_ICON
+            if h.bankStamp and (now - h.bankStamp) > BANK_STALE then stale = true end
+        end
+        -- Bagnon-style right cell: single location shows just "N[icon]"; a split
+        -- shows the per-character total then the breakdown, e.g. "63=17[bag]+46[bank]".
+        local right = parts[1] or ""
+        if #parts > 1 then
+            right = ((h.bags or 0) + (h.bank or 0)) .. "=" .. table.concat(parts, "+")
+        end
+        tt:AddDoubleLine(nm, right, cc.r, cc.g, cc.b, 1, 1, 1)
+    end
+    if stale then tt:AddLine("Bank data may be out of date", .55, .55, .55) end
     tt:Show()
 end
 
 -- A hyperlink'd tooltip re-renders itself from the item link on the async
 -- item-info callback (and for uncached remote-alt items that arrive later),
--- which wipes lines appended after SetHyperlink. So we append the breakdown
--- from GameTooltip's own OnTooltipSetItem, which re-fires on every re-render —
--- the breakdown is re-added each time and never vanishes. hoverEntry gates it
--- to our cells so we don't decorate every item tooltip in the game.
+-- which wipes lines appended after SetHyperlink. So we append from GameTooltip's
+-- own OnTooltipSetItem, which re-fires on every re-render — the breakdown is
+-- re-added each time and never vanishes. Installed once at bootstrap so it also
+-- enriches item tooltips everywhere (bags, bank, merchant, links), gated by the
+-- warbandItemTooltips setting. hoverEntry routes our own panel cells to their
+-- precomputed aggregate.
 local function EnsureTooltipHook()
     if AT_WB._ttHooked then return end
     AT_WB._ttHooked = true
     GameTooltip:HookScript("OnTooltipSetItem", function(tt)
         local e = AT_WB.hoverEntry
-        if e then AppendBreakdown(tt, e) end
+        if e then AppendBreakdown(tt, e.total, e.holders); return end
+        -- Global enrichment is opt-in (default off) so it doesn't double up with
+        -- Bagnon's per-account "Item Tooltip Counts". Enable it in the Warband tab.
+        if not (AltTrackerConfig and AltTrackerConfig.warbandItemTooltips) then return end
+        if not tt.GetItem then return end
+        local _, link = tt:GetItem()
+        local id = link and tonumber(link:match("item:(%d+)"))
+        if id then
+            local total, holders = CountItem(id)
+            if total > 0 then AppendBreakdown(tt, total, holders) end
+        end
     end)
 end
 
@@ -406,7 +463,7 @@ local function CellOnEnter(self)
         local qc = e.quality and ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[e.quality]
         if qc then r, g, b = qc.r, qc.g, qc.b end
         GameTooltip:AddLine(e.name or ("Item " .. e.id), r, g, b)
-        AppendBreakdown(GameTooltip, e)
+        AppendBreakdown(GameTooltip, e.total, e.holders)
     end
 end
 
@@ -423,7 +480,7 @@ end
 -- not buried in a ScrollFrame, which was swallowing the hover events. Scrolling
 -- is virtual: we lay out only the visible window of rows and shift it on the
 -- mouse wheel.
-local ROW_TOP = TITLE_H + 12   -- first row Y (below the title/search strip)
+local ROW_TOP = TITLE_H + 32   -- first row Y (below the title + tooltip-toggle strip)
 
 local function getHeader(i)
     local fs = AT_WB.headers[i]
@@ -629,6 +686,21 @@ local function BuildPanel(mainFrame)
         ApplySearchDim()
     end)
 
+    -- Opt-in toggle for the global item-tooltip enrichment (off by default so it
+    -- doesn't double up with Bagnon). Lives here rather than in SheetUI's Options.
+    local tipCheck = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
+    tipCheck:SetSize(18, 18)
+    tipCheck:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD, -(PAD + TITLE_H - 6))
+    tipCheck:SetChecked(AltTrackerConfig and AltTrackerConfig.warbandItemTooltips and true or false)
+    tipCheck:SetScript("OnClick", function(self)
+        AltTrackerConfig = AltTrackerConfig or {}
+        AltTrackerConfig.warbandItemTooltips = self:GetChecked() and true or false
+    end)
+    local tipLbl = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    tipLbl:SetPoint("LEFT", tipCheck, "RIGHT", 2, 0)
+    tipLbl:SetText("Show alt counts on all item tooltips")
+    tipLbl:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+
     -- Virtual scroll: the wheel shifts which rows are laid out (cells are direct
     -- panel children, so hover works — a real ScrollFrame ate the mouse events).
     panel:EnableMouseWheel(true)
@@ -638,7 +710,7 @@ local function BuildPanel(mainFrame)
     end)
 
     emptyFS = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    emptyFS:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD, -(TITLE_H + 12))
+    emptyFS:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD, -(TITLE_H + 34))
     emptyFS:SetText("No inventory captured yet. Log in on your alts (and open a bank) to populate this.")
     emptyFS:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
     emptyFS:Hide()
@@ -692,6 +764,7 @@ local function BootstrapPlugin(isOnDemand)
         Print("AltTracker not found — make sure it is installed and enabled.")
         return
     end
+    EnsureTooltipHook()   -- install now so the global item-tooltip option works pre-panel
     AltTracker.RegisterPlugin({
         id            = ADDON_ID,
         label         = "Warband",
@@ -703,7 +776,7 @@ local function BootstrapPlugin(isOnDemand)
         OnDeserialize = function(g, b) DeserializePlayer(g, b) end,
         _test = {
             SerializePlayer = SerializePlayer, DeserializePlayer = DeserializePlayer,
-            gather = gather, ScanBags = ScanBags, ScanBank = ScanBank,
+            gather = gather, ScanBags = ScanBags, ScanBank = ScanBank, CountItem = CountItem,
             EncodeMap = EncodeMap, ParseMap = ParseMap, mapsEqual = mapsEqual,
             OnBagUpdate = OnBagUpdate, OnBankOpened = OnBankOpened, OnBankClosed = OnBankClosed,
         },

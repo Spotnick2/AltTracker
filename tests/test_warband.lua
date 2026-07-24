@@ -245,6 +245,25 @@ eq(AltTrackerWarbandDB[GUID].bank[900], 2, "post-close scheduled scan keeps the 
 check(AltTrackerWarbandDB[GUID].bank[901] == nil, "the changed post-close contents are not committed")
 
 ------------------------------------------------------------
+-- 13. CountItem: single-item cross-alt sum for the global tooltip hook
+------------------------------------------------------------
+AltTrackerDB = {
+    ["G1"] = { guid = "G1", name = "Alpha", class = "MAGE" },
+    ["G2"] = { guid = "G2", name = "Bravo", class = "ROGUE" },
+    ["G3"] = { guid = "G3", name = "Cara",  class = "PRIEST" },
+}
+AltTrackerWarbandDB = {
+    ["G1"] = { bags = { [55] = 4 }, bank = { [55] = 6 } },   -- 10 total, both locations
+    ["G2"] = { bags = { [55] = 2 } },                        -- 2 in bags
+    ["G3"] = { bags = { [999] = 1 } },                       -- doesn't hold 55
+}
+local total, holders = T.CountItem(55)
+eq(total, 12, "CountItem sums an item across every alt's bags+bank (4+6+2)")
+eq(#holders, 2, "only alts that actually hold the item are listed")
+local zero = T.CountItem(12345)
+eq(zero, 0, "an item nobody holds totals zero")
+
+------------------------------------------------------------
 if failures == 0 then
     print("warband tests passed: " .. testsRun)
 else
