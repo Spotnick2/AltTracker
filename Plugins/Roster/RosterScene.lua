@@ -178,6 +178,9 @@ local function EnsureCard(i)
     card:SetScript("OnClick", function(self)
         if self.char and api.onSelect then api.onSelect(self.char.guid) end
     end)
+    card:SetScript("OnDoubleClick", function(self)
+        if self.char and api.openDetails then api.openDetails(self.char.guid) end
+    end)
     card:SetScript("OnEnter", ShowCardTooltip)
     card:SetScript("OnLeave", function() GameTooltip:Hide() end)
 

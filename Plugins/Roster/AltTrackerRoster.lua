@@ -3455,6 +3455,11 @@ local function BuildPanel(mainFrame)
                 AltTrackerRosterDB.selectedGuid = guid
                 AT_ALTS.Refresh()
             end,
+            openDetails = function(guid)
+                selectedGuid = guid
+                AltTrackerRosterDB.selectedGuid = guid
+                AT_ALTS.SetViewMode("list")  -- jump to the List view focused on this character
+            end,
         })
     end
 
