@@ -347,42 +347,71 @@ local function DupName(holders, name)
     return c > 1
 end
 
--- Build the tooltip manually with AddLine rather than SetHyperlink + append:
--- a hyperlink'd tooltip re-renders itself from the item link (async item-info
--- callback), which wipes any custom lines appended after it — so the per-alt
--- breakdown, which is the whole point of this view, would vanish. We show a
--- quality-coloured item-name header instead and keep full control of the body.
-local function CellOnEnter(self)
-    local e = self.entry
-    if not e then return end
-    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-    GameTooltip:ClearLines()
-
-    local r, g, b = 1, 1, 1
-    local qc = e.quality and ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[e.quality]
-    if qc then r, g, b = qc.r, qc.g, qc.b end
-    GameTooltip:AddLine(e.name or ("Item " .. e.id), r, g, b)
-    GameTooltip:AddDoubleLine("Total across alts", tostring(e.total), 0.7, 0.7, 0.7, 1, 1, 1)
-    GameTooltip:AddLine(" ")
+-- Append the cross-alt breakdown: the real item tooltip (via SetHyperlink) plus
+-- one line per character PER LOCATION (bags/bank separate), Altoholic-style.
+local function AppendBreakdown(tt, e)
+    tt:AddLine(" ")
+    tt:AddDoubleLine("Across alts", tostring(e.total), 0.7, 0.7, 0.7, 1, 1, 1)
 
     local holders = {}
     for _, h in ipairs(e.holders or {}) do holders[#holders + 1] = h end
     table.sort(holders, function(a, b2) return (a.name or "") < (b2.name or "") end)
 
     local now = time()
-    local stale = false
     for _, h in ipairs(holders) do
         local cc = (h.class and RAID_CLASS_COLORS and RAID_CLASS_COLORS[h.class]) or { r = .9, g = .9, b = .9 }
         local nm = h.name or "?"
         if h.realm and DupName(e.holders, h.name) then nm = nm .. "-" .. h.realm end
-        local parts = {}
-        if (h.bags or 0) > 0 then parts[#parts + 1] = "Bags " .. h.bags end
-        if (h.bank or 0) > 0 then parts[#parts + 1] = "Bank " .. h.bank end
-        GameTooltip:AddDoubleLine(nm, table.concat(parts, ", "), cc.r, cc.g, cc.b, 0.85, 0.85, 0.85)
-        if (h.bank or 0) > 0 and h.bankStamp and (now - h.bankStamp) > BANK_STALE then stale = true end
+        if (h.bags or 0) > 0 then
+            tt:AddDoubleLine(nm .. "  |cff888888Bags|r", tostring(h.bags), cc.r, cc.g, cc.b, .9, .9, .9)
+        end
+        if (h.bank or 0) > 0 then
+            local old = h.bankStamp and (now - h.bankStamp) > BANK_STALE
+            tt:AddDoubleLine(nm .. "  |cff888888Bank" .. (old and " (old)" or "") .. "|r",
+                             tostring(h.bank), cc.r, cc.g, cc.b, .9, .9, .9)
+        end
     end
-    if stale then GameTooltip:AddLine("Bank data may be out of date", .55, .55, .55) end
-    GameTooltip:Show()
+    tt:Show()
+end
+
+-- A hyperlink'd tooltip re-renders itself from the item link on the async
+-- item-info callback (and for uncached remote-alt items that arrive later),
+-- which wipes lines appended after SetHyperlink. So we append the breakdown
+-- from GameTooltip's own OnTooltipSetItem, which re-fires on every re-render —
+-- the breakdown is re-added each time and never vanishes. hoverEntry gates it
+-- to our cells so we don't decorate every item tooltip in the game.
+local function EnsureTooltipHook()
+    if AT_WB._ttHooked then return end
+    AT_WB._ttHooked = true
+    GameTooltip:HookScript("OnTooltipSetItem", function(tt)
+        local e = AT_WB.hoverEntry
+        if e then AppendBreakdown(tt, e) end
+    end)
+end
+
+local function CellOnEnter(self)
+    local e = self.entry
+    if not e then return end
+    AT_WB.hoverEntry = e
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    -- SetHyperlink drives the item tooltip; OnTooltipSetItem then appends the
+    -- breakdown. Guard it so a finicky bare-item string never aborts the hover.
+    local ok = pcall(function() GameTooltip:SetHyperlink("item:" .. e.id) end)
+    if not ok or GameTooltip:NumLines() == 0 then
+        -- Fallback: no item tooltip available (uncached, no data yet) — show a
+        -- quality-coloured name header and the breakdown directly.
+        GameTooltip:ClearLines()
+        local r, g, b = 1, 1, 1
+        local qc = e.quality and ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[e.quality]
+        if qc then r, g, b = qc.r, qc.g, qc.b end
+        GameTooltip:AddLine(e.name or ("Item " .. e.id), r, g, b)
+        AppendBreakdown(GameTooltip, e)
+    end
+end
+
+local function CellOnLeave()
+    AT_WB.hoverEntry = nil
+    GameTooltip:Hide()
 end
 
 local function hideFrom(pool, from)
@@ -406,6 +435,10 @@ local function getCell(i)
         cell = CreateFrame("Button", nil, content, "BackdropTemplate")
         cell:SetSize(ICON, ICON)
         cell:EnableMouse(true)
+        -- Sit above the scroll child + any panel overlays so hover reliably
+        -- reaches the cell (mirrors the Roster gear buttons' frame-level bump).
+        cell:SetFrameStrata(content:GetFrameStrata() or "MEDIUM")
+        cell:SetFrameLevel((content:GetFrameLevel() or 1) + 10)
         cell:SetBackdrop({ edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 })
         cell.icon = cell:CreateTexture(nil, "ARTWORK")
         cell.icon:SetPoint("TOPLEFT", 1, -1)
@@ -414,7 +447,7 @@ local function getCell(i)
         cell.count = cell:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
         cell.count:SetPoint("BOTTOMRIGHT", -1, 1)
         cell:SetScript("OnEnter", CellOnEnter)
-        cell:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        cell:SetScript("OnLeave", CellOnLeave)
         AT_WB.cells[i] = cell
     end
     return cell
@@ -538,6 +571,7 @@ end
 
 local function BuildPanel(mainFrame)
     if panel then return end
+    EnsureTooltipHook()
     local sidebarW = (AltTracker.LAYOUT and AltTracker.LAYOUT.SIDEBAR_WIDTH) or 230
     local titleH   = (AltTracker.LAYOUT and AltTracker.LAYOUT.TITLE_H) or 30
 
