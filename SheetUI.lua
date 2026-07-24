@@ -662,8 +662,16 @@ do
         -- Show() is later blocked in combat are retried on PLAYER_REGEN_ENABLED.
         self.hiddenFrames = {}
         for _, child in ipairs({ UIParent:GetChildren() }) do
-            if child ~= sheet and child.IsShown and child:IsShown() and child.Hide then
-                if pcall(child.Hide, child) then
+            if child ~= sheet then
+                -- Some UIParent children are FORBIDDEN frames (the in-game shop,
+                -- etc.); calling any method on them errors ("bad self"), which
+                -- would abort the whole hide. Guard every access with pcall and
+                -- skip forbidden frames.
+                local ok, shown = pcall(function()
+                    if child.IsForbidden and child:IsForbidden() then return false end
+                    return child.IsShown and child:IsShown() and child.Hide ~= nil
+                end)
+                if ok and shown and pcall(child.Hide, child) then
                     self.hiddenFrames[#self.hiddenFrames + 1] = child
                 end
             end

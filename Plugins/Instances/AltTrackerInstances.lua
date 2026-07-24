@@ -321,7 +321,7 @@ function AT_SI._Bootstrap()
     AltTracker.RegisterPlugin({
         id           = ADDON_ID,
         label        = "Raids",
-        icon         = "Interface\\Icons\\Achievement_Boss_Gruulthedragonkiller",
+        icon         = (AltTracker.MEDIA_PATH or "Interface\\AddOns\\AltTracker\\Media\\") .. "Icons\\raid.tga",
         _isPlugin    = true,
         OnActivate   = function(mainFrame) AT_SI.Activate(mainFrame) end,
         OnDeactivate = function(mainFrame) AT_SI.Deactivate(mainFrame) end,
