@@ -44,6 +44,8 @@ local SCENE_BACKDROPS = {
       file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\dark-portal-campsite.tga", w = 1024, h = 682 },
     { id = "sunwell", label = "Sunwell Plateau",
       file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\sunwell-plateau-campsite.tga", w = 1024, h = 682 },
+    { id = "zangarmarsh", label = "Zangarmarsh",
+      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\zangarmarsh-coilfang-campsite.tga", w = 1024, h = 682 },
     { id = "plain",    label = "Plain (dark)", file = nil },
 }
 local curBackdrop = 1     -- index into SCENE_BACKDROPS
