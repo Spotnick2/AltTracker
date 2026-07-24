@@ -3453,6 +3453,8 @@ local function BuildPanel(mainFrame)
                 if not entry or not entry.image then return nil end
                 return NormalizeManifestImagePath(entry.image), tonumber(entry.width), tonumber(entry.height)
             end,
+            getBackdropId = function() return GetUIState().sceneBackdrop end,
+            setBackdropId = function(id) GetUIState().sceneBackdrop = id end,
             classIconPath = ClassIconPath,
             classDisplay  = function(token) return CLASS_DISPLAY[(token or ""):upper()] end,
             raceDisplay   = function(char) return char and (RACE_DISPLAY[char.race or ""] or char.race) or nil end,

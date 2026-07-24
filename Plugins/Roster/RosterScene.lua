@@ -31,9 +31,16 @@ local lastCamp, lastSelected
 local DEFAULT_SRC_W = 512
 local DEFAULT_SRC_H = 896
 
--- scenic backdrop (cover-cropped to the panel; procedural floor if the file is missing)
-local BACKDROP_IMAGE = "Interface\\AddOns\\AltTracker\\Media\\Scene\\roster-campsite.tga"
-local BACKDROP_W, BACKDROP_H = 1024, 682
+-- Selectable scenic backdrops. Add entries here as TGAs are generated (raid-themed
+-- camps, daylight camps, etc.). A nil `file` = the plain procedural floor. Each backdrop
+-- is cover-cropped to the panel; `w`/`h` are the TGA's pixel dims (for the crop math).
+local SCENE_BACKDROPS = {
+    { id = "campsite", label = "Forest Camp",
+      file = "Interface\\AddOns\\AltTracker\\Media\\Scene\\roster-campsite.tga", w = 1024, h = 682 },
+    { id = "plain",    label = "Plain (dark)", file = nil },
+}
+local curBackdrop = 1     -- index into SCENE_BACKDROPS
+local curBW, curBH = 1024, 682
 
 -- cutout "hero carousel" layout: the selected character is centered and largest,
 -- the rest flank it symmetrically, shrinking and dimming with distance (perspective).
@@ -354,39 +361,109 @@ end
 -- ---------------------------------------------------------------------------
 -- Backdrop
 -- ---------------------------------------------------------------------------
-local function BuildBackdrop()
-    AltTracker.ApplyBGOnly(root, 0.035, 0.04, 0.055, 1)   -- fallback night sky
-
-    root.image = root:CreateTexture(nil, "BACKGROUND")
-    root.image:SetAllPoints(root)
-    local ok = pcall(root.image.SetTexture, root.image, BACKDROP_IMAGE)
-    root._hasBackdropImage = (ok and root.image:GetTexture()) and true or false
-
-    if root._hasBackdropImage then
-        root.image:Show()
-    else
-        root.image:Hide()
-        -- procedural campsite floor (used only when the backdrop image is missing)
-        root.ground = root:CreateTexture(nil, "BACKGROUND")
-        root.ground:SetColorTexture(0.075, 0.07, 0.062, 1)
-        root.ground:SetPoint("BOTTOMLEFT", root, "BOTTOMLEFT", 0, 0)
-        root.ground:SetPoint("BOTTOMRIGHT", root, "BOTTOMRIGHT", 0, 0)
-        root.ground:SetPoint("TOP", root, "BOTTOM", 0, 160)
-
-        root.horizon = root:CreateTexture(nil, "BACKGROUND")
-        root.horizon:SetHeight(1)
-        root.horizon:SetPoint("BOTTOMLEFT", root.ground, "TOPLEFT", 0, 0)
-        root.horizon:SetPoint("BOTTOMRIGHT", root.ground, "TOPRIGHT", 0, 0)
-        root.horizon:SetColorTexture(0.0, 0.0, 0.0, 0.35)
+-- Cover-crop the current backdrop image to the panel aspect (no stretch).
+local function LayoutBackdrop(rW, rH)
+    if root and root._hasBackdropImage and root.image then
+        local u1, u2, v1, v2 = CoverTexCoord(rW, rH, curBW, curBH)
+        root.image:SetTexCoord(u1, u2, v1, v2)
     end
 end
 
--- Cover-crop the backdrop image to the panel aspect (no stretch).
-local function LayoutBackdrop(rW, rH)
-    if root and root._hasBackdropImage and root.image then
-        local u1, u2, v1, v2 = CoverTexCoord(rW, rH, BACKDROP_W, BACKDROP_H)
-        root.image:SetTexCoord(u1, u2, v1, v2)
+-- Apply backdrop #idx: show its image (or the procedural floor when file is nil/missing),
+-- update the picker label, and persist the choice.
+local function ApplyBackdrop(idx)
+    local n = #SCENE_BACKDROPS
+    if n == 0 or not root then return end
+    idx = ((idx - 1) % n) + 1
+    curBackdrop = idx
+    local bd = SCENE_BACKDROPS[idx]
+
+    local haveImage = false
+    if bd.file and root.image then
+        local ok = pcall(root.image.SetTexture, root.image, bd.file)
+        haveImage = (ok and root.image:GetTexture()) and true or false
     end
+    root._hasBackdropImage = haveImage
+
+    if haveImage then
+        curBW, curBH = bd.w or 1024, bd.h or 682
+        root.image:Show()
+        if root.ground then root.ground:Hide() end
+        if root.horizon then root.horizon:Hide() end
+        LayoutBackdrop(root:GetWidth(), root:GetHeight())
+    else
+        if root.image then root.image:Hide() end
+        if root.ground then root.ground:Show() end
+        if root.horizon then root.horizon:Show() end
+    end
+
+    if root.picker then root.picker.label:SetText(bd.label or "") end
+    if api.setBackdropId then api.setBackdropId(bd.id) end
+end
+
+local function CycleBackdrop(delta)
+    ApplyBackdrop(curBackdrop + delta)
+end
+
+local function BuildBackdrop()
+    AltTracker.ApplyBGOnly(root, 0.035, 0.04, 0.055, 1)   -- base night sky behind everything
+
+    root.image = root:CreateTexture(nil, "BACKGROUND")
+    root.image:SetAllPoints(root)
+    root.image:Hide()
+
+    -- procedural floor: shown for the "Plain" backdrop (or if an image fails to load)
+    root.ground = root:CreateTexture(nil, "BACKGROUND")
+    root.ground:SetColorTexture(0.075, 0.07, 0.062, 1)
+    root.ground:SetPoint("BOTTOMLEFT", root, "BOTTOMLEFT", 0, 0)
+    root.ground:SetPoint("BOTTOMRIGHT", root, "BOTTOMRIGHT", 0, 0)
+    root.ground:SetPoint("TOP", root, "BOTTOM", 0, 160)
+    root.ground:Hide()
+
+    root.horizon = root:CreateTexture(nil, "BACKGROUND")
+    root.horizon:SetHeight(1)
+    root.horizon:SetPoint("BOTTOMLEFT", root.ground, "TOPLEFT", 0, 0)
+    root.horizon:SetPoint("BOTTOMRIGHT", root.ground, "TOPRIGHT", 0, 0)
+    root.horizon:SetColorTexture(0.0, 0.0, 0.0, 0.35)
+    root.horizon:Hide()
+
+    -- backdrop picker (◄ label ►) — only shown when there's more than one choice
+    if #SCENE_BACKDROPS > 1 then
+        local pick = CreateFrame("Frame", nil, root)
+        pick:SetSize(240, 22)
+        pick:SetPoint("TOP", root, "TOP", 0, -8)
+        pick:SetFrameLevel((root:GetFrameLevel() or 1) + 40)
+
+        local pbg = pick:CreateTexture(nil, "BACKGROUND")
+        pbg:SetAllPoints(pick)
+        pbg:SetColorTexture(0, 0, 0, 0.35)
+
+        local prev = CreateFrame("Button", nil, pick)
+        prev:SetSize(24, 22); prev:SetPoint("LEFT", pick, "LEFT", 2, 0)
+        prev.t = prev:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        prev.t:SetAllPoints(prev); prev.t:SetText("<")
+        prev:SetScript("OnClick", function() CycleBackdrop(-1) end)
+
+        local nxt = CreateFrame("Button", nil, pick)
+        nxt:SetSize(24, 22); nxt:SetPoint("RIGHT", pick, "RIGHT", -2, 0)
+        nxt.t = nxt:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        nxt.t:SetAllPoints(nxt); nxt.t:SetText(">")
+        nxt:SetScript("OnClick", function() CycleBackdrop(1) end)
+
+        pick.label = pick:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        pick.label:SetPoint("CENTER", pick, "CENTER", 0, 0)
+        root.picker = pick
+    end
+
+    -- restore the saved backdrop (by id), else default to the first
+    local savedId = api.getBackdropId and api.getBackdropId()
+    local startIdx = 1
+    if savedId then
+        for i, bd in ipairs(SCENE_BACKDROPS) do
+            if bd.id == savedId then startIdx = i; break end
+        end
+    end
+    ApplyBackdrop(startIdx)
 end
 
 -- ---------------------------------------------------------------------------
