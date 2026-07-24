@@ -1397,6 +1397,13 @@ local function BuildHeaders()
                 GameTooltip:SetOwner(btn,"ANCHOR_BOTTOM"); GameTooltip:ClearLines()
                 local tipText = COL_TOOLTIPS[col.field] or col.label
                 GameTooltip:AddLine(tipText,1,1,1)
+                if col.field=="bisCount" then
+                    -- Legend: the % column and the per-slot green checkmark
+                    -- are otherwise unexplained on-screen (issue #2).
+                    local check = "|TInterface\\RAIDFRAME\\ReadyCheck-Ready:12:12:0:0:64:64:4:60:4:60|t"
+                    GameTooltip:AddLine("|cffaaaaaaPercent of gear slots holding a best-in-slot item.|r",1,1,1,true)
+                    GameTooltip:AddLine(check.." |cffaaaaaamarks a BiS item in each gear-slot column.|r",1,1,1,true)
+                end
                 GameTooltip:AddLine("Sort by "..col.label,0.7,0.7,0.7); GameTooltip:Show()
             end)
             btn:SetScript("OnLeave",function()
