@@ -48,6 +48,9 @@ public sealed class AppConfig
         public string PromptTemplateVersion { get; set; } = "v2";
         public string GenerationVersion { get; set; } = "1";
         public string ReferenceImagesPath { get; set; } = "";
+        /// <summary>WoW Screenshots folder. When a character has an addon-stamped refshot_ts, the
+        /// pipeline prefers the screenshot captured near that time here over the static saved reference.</summary>
+        public string ScreenshotsDirectory { get; set; } = "";
         public int TimeoutSeconds { get; set; } = 120;
         public int MaxRetries { get; set; } = 2;
         public Dictionary<string, string> CharacterReferenceImages { get; set; } = new();

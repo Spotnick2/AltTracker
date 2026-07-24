@@ -92,7 +92,7 @@ public sealed class HeroShotRenderAdapter : IRenderAdapter
 
         // Resolve reference image before building the prompt so the prompt can signal its presence
         byte[]? refBytes = null;
-        var refPath = ResolveReferenceImagePath(job.ManifestKey, job.OutputBaseName, cfg);
+        var refPath = ResolveReferenceImagePath(c, job.ManifestKey, job.OutputBaseName, cfg, logger);
         var refFingerprint = "";
         if (!string.IsNullOrWhiteSpace(refPath) && File.Exists(refPath))
         {
@@ -182,8 +182,23 @@ public sealed class HeroShotRenderAdapter : IRenderAdapter
         sources[job.JobKey] = stagingPath;
     }
 
-    private static string? ResolveReferenceImagePath(string manifestKey, string baseName, AppConfig.HeroShotConfig cfg)
+    private static string? ResolveReferenceImagePath(
+        CharacterRecord character, string manifestKey, string baseName, AppConfig.HeroShotConfig cfg, RunLogger logger)
     {
+        // 0. Fresh in-game capture (/alts update-reference): if the addon stamped a refshot_ts and a
+        //    Screenshots/ file exists near that time, prefer it — it beats a stale saved reference.
+        if (character.ReferenceShotEpoch > 0 && !string.IsNullOrWhiteSpace(cfg.ScreenshotsDirectory)
+            && Directory.Exists(cfg.ScreenshotsDirectory))
+        {
+            var shot = FindScreenshotNearEpoch(cfg.ScreenshotsDirectory, character.ReferenceShotEpoch);
+            if (shot is not null)
+            {
+                logger.Info($"[HeroShot] Using fresh in-game capture for {manifestKey}: {shot}");
+                return shot;
+            }
+            logger.Warn($"[HeroShot] {manifestKey} has refshot_ts={character.ReferenceShotEpoch} but no matching screenshot in {cfg.ScreenshotsDirectory}; falling back.");
+        }
+
         // 1. Explicit per-character override in config
         if (cfg.CharacterReferenceImages.TryGetValue(manifestKey, out var configuredPath)
             && !string.IsNullOrWhiteSpace(configuredPath))
@@ -203,6 +218,33 @@ public sealed class HeroShotRenderAdapter : IRenderAdapter
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Finds the screenshot whose file time is closest to <paramref name="epoch"/> (the addon's
+    /// capture marker), within a tolerance window. WoW writes the file the instant Screenshot()
+    /// fires, so its mtime lines up with refshot_ts regardless of when SavedVariables was flushed.
+    /// </summary>
+    private static string? FindScreenshotNearEpoch(string dir, long epoch)
+    {
+        var target = DateTimeOffset.FromUnixTimeSeconds(epoch);
+        var tolerance = TimeSpan.FromSeconds(45);
+        string? best = null;
+        var bestDelta = tolerance;
+
+        foreach (var f in Directory.EnumerateFiles(dir))
+        {
+            var ext = Path.GetExtension(f).ToLowerInvariant();
+            if (ext is not (".jpg" or ".jpeg" or ".tga" or ".png")) continue;
+            var mtime = new DateTimeOffset(File.GetLastWriteTimeUtc(f), TimeSpan.Zero);
+            var delta = (mtime - target).Duration();
+            if (delta <= bestDelta)
+            {
+                bestDelta = delta;
+                best = f;
+            }
+        }
+        return best;
     }
 
     private static IHeroShotRenderProvider CreateProvider(AppConfig.HeroShotConfig cfg, RunLogger logger)

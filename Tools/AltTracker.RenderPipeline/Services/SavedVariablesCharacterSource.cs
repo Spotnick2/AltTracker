@@ -88,6 +88,7 @@ public sealed class SavedVariablesCharacterSource
                 Class = ReadString(t, "class"),
                 Level = ReadInt(t, "level"),
                 LastUpdateEpoch = ReadLong(t, "lastUpdate"),
+                ReferenceShotEpoch = ReadLong(t, "refshot_ts"),
                 GearItemIds = gearIds,
                 GearLinks = gearLinks,
                 GearNames = gearNames,

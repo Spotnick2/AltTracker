@@ -18,6 +18,10 @@ public sealed class CharacterRecord
     public string Class { get; init; } = "";
     public int Level { get; init; }
     public long LastUpdateEpoch { get; init; }
+    /// <summary>Epoch stamped by the addon's /alts update-reference when it captured a fresh
+    /// in-game screenshot. The render pipeline matches this to a Screenshots/ file (by mtime) and
+    /// prefers it as the reference over the stale saved one. 0 = never captured in-game.</summary>
+    public long ReferenceShotEpoch { get; init; }
     public IReadOnlyDictionary<string, int> GearItemIds { get; init; } = new Dictionary<string, int>();
     public IReadOnlyDictionary<string, string> GearLinks { get; init; } = new Dictionary<string, string>();
     /// <summary>Per-slot item name from gearname_ — synced cross-account, so present even when the
