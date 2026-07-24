@@ -20,4 +20,7 @@ public sealed class CharacterRecord
     public long LastUpdateEpoch { get; init; }
     public IReadOnlyDictionary<string, int> GearItemIds { get; init; } = new Dictionary<string, int>();
     public IReadOnlyDictionary<string, string> GearLinks { get; init; } = new Dictionary<string, string>();
+    /// <summary>Per-slot item subtype captured in-client from GetItemInfo (e.g. "Dagger", "Mail").
+    /// Authoritative weapon/armor type; empty for slots scanned before this field existed.</summary>
+    public IReadOnlyDictionary<string, string> GearSubTypes { get; init; } = new Dictionary<string, string>();
 }

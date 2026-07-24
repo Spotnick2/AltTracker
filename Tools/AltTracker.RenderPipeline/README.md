@@ -78,7 +78,8 @@ Requires the `codex` CLI installed and ChatGPT-authenticated on the machine (`co
     "CodexExecutable": "codex",
     "ReasoningEffort": "low",
     "TimeoutSeconds": 360,
-    "ExtraArgs": ""
+    "ExtraArgs": "",
+    "EnableWebSearch": false
   }
 }
 ```
@@ -90,6 +91,10 @@ Requires the `codex` CLI installed and ChatGPT-authenticated on the machine (`co
   reference is essential for identity accuracy).
 - `Codex.ReasoningEffort`: `low` (default) / `medium` / `high`. `Codex.TimeoutSeconds`: per-generation
   hard timeout (built-in `image_gen` commonly takes 2–4 minutes; no retry happens on timeout).
+- `Codex.EnableWebSearch`: `false` (default). When `true`, codex is given its web-search tool and told to
+  look up each equipped item by ID (e.g. on Wowhead) before generating, so the transmog matches the real
+  in-game model. More accurate for obscure gear, but adds a browsing step per render and consumes OpenAI
+  usage. The equipped item names + IDs are placed in the prompt either way; this flag only controls lookup.
 
 ### Reference images
 

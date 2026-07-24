@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("AltTracker.RenderPipeline")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+49eb7f9b4eab9386027035f5dd0acbab035d2d8e")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+5e5a7ece2fb9457059b56899ad6defddfc006c33")]
 [assembly: System.Reflection.AssemblyProductAttribute("AltTracker.RenderPipeline")]
 [assembly: System.Reflection.AssemblyTitleAttribute("AltTracker.RenderPipeline")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

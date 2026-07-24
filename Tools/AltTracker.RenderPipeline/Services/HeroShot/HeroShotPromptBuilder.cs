@@ -22,18 +22,21 @@ public static class HeroShotPromptBuilder
         var raceDetails    = BuildRaceDetails(race, gender);
         var classHint      = BuildClassHint(cls, hasRangedGear);
         var weaponHint     = BuildWeaponHint(character, cls, hasReferenceImage, hasMainHandGear, hasOffHandGear);
+        var gearManifest   = BuildGearManifest(character);
         var petHint        = BuildPetHint(cls, hasReferenceImage);
         var genderPronoun  = gender.Equals("Male", StringComparison.OrdinalIgnoreCase) ? "He" : "She";
         var background     = BuildBackground(cls);
         var styleDesc      = BuildStyleDescription(stylePreset);
 
-        var petSection = string.IsNullOrEmpty(petHint) ? "" : $"{petHint} ";
+        var petSection  = string.IsNullOrEmpty(petHint) ? "" : $"{petHint} ";
+        var gearSection = string.IsNullOrEmpty(gearManifest) ? "" : $"{gearManifest} ";
 
         return $"{directive} " +
                $"{subject}. " +
                $"{raceDetails} " +
                $"{genderPronoun} stands in a confident heroic three-quarter pose, {classHint}. " +
                $"{weaponHint} " +
+               $"{gearSection}" +
                $"{petSection}" +
                $"Background: {background} " +
                $"{styleDesc}. " +
@@ -56,7 +59,12 @@ public static class HeroShotPromptBuilder
                    "the character is rendered in sharp focus and fills most of the frame, " +
                    "while the background is heavily blurred with soft bokeh, exactly like the WoW character selection screen. " +
                    "Reproduce that same framing and depth-of-field treatment. " +
-                   "Use the screenshot as a reference for the character's appearance, gear, race, facial features, and weapons. " +
+                   "Use the screenshot as the reference for the character's IDENTITY ONLY: race, skin tone, facial features, " +
+                   "hair and tusks, body build, and overall pose. " +
+                   "Do NOT rely on the screenshot to determine the appearance of armor or weapons — the character-select " +
+                   "angle, lighting, and low resolution make transmog unreliable to read. " +
+                   "Instead, render each equipped piece from the authoritative gear list below, matching each item's true " +
+                   "in-game model. Use the screenshot only to confirm the weapon silhouette and which hand holds what. " +
                    "Weapon setup must match the screenshot silhouette exactly. " +
                    "If a one-handed weapon plus off-hand is shown, preserve that and do not replace it with a staff. " +
                    "Do NOT reproduce the specific background scenery or environment from the screenshot — " +
@@ -143,10 +151,8 @@ public static class HeroShotPromptBuilder
         bool hasMainHandGear,
         bool hasOffHandGear)
     {
-        var mainName = TryExtractItemName(character, "mainhand");
-        var offName = TryExtractItemName(character, "offhand");
-        var mainType = InferMainHandType(mainName);
-        var offType = InferOffHandType(offName);
+        var mainType = ResolveMainHandType(character);
+        var offType = ResolveOffHandType(character);
 
         if (hasMainHandGear && hasOffHandGear)
         {
@@ -189,6 +195,67 @@ public static class HeroShotPromptBuilder
             : "Weapon setup: use class-appropriate weapon silhouettes consistent with WoW TBC gear.";
     }
 
+    // ── Gear manifest (authoritative transmog source) ─────────────────────────
+
+    /// <summary>
+    /// Ordered list of the transmog-visible slots and their human-readable labels.
+    /// Neck, rings, and trinkets are omitted — they don't show on the character model.
+    /// </summary>
+    private static readonly (string Slot, string Label)[] VisibleGearSlots =
+    [
+        ("head", "Head"), ("shoulder", "Shoulders"), ("back", "Cloak"), ("chest", "Chest"),
+        ("wrist", "Wrists"), ("hands", "Hands"), ("waist", "Waist"), ("legs", "Legs"),
+        ("feet", "Feet"), ("mainhand", "Main hand"), ("offhand", "Off hand"), ("ranged", "Ranged"),
+    ];
+
+    /// <summary>
+    /// Enumerates every equipped, visible slot with its exact item name and item ID (and inferred
+    /// weapon type where known). This list — not the screenshot — is the authoritative source for
+    /// the transmog: each entry is a real WoW: TBC Classic item whose true model should be rendered.
+    /// The item IDs let a web-enabled generator resolve the exact appearance (e.g. via Wowhead).
+    /// </summary>
+    private static string BuildGearManifest(CharacterRecord character)
+    {
+        var lines = new List<string>();
+        foreach (var (slot, label) in VisibleGearSlots)
+        {
+            var name = TryExtractItemName(character, slot);
+            if (string.IsNullOrWhiteSpace(name)) continue;
+
+            var hasId = character.GearItemIds.TryGetValue(slot, out var id) && id > 0;
+            var idPart = hasId ? $" (item {id})" : "";
+
+            var typePart = "";
+            if (slot == "mainhand")
+            {
+                var t = ResolveMainHandType(character);
+                if (!string.IsNullOrWhiteSpace(t)) typePart = $" [{t}]";
+            }
+            else if (slot == "offhand")
+            {
+                var t = ResolveOffHandType(character);
+                if (!string.IsNullOrWhiteSpace(t) && t != "off-hand item") typePart = $" [{t}]";
+            }
+            else
+            {
+                // Armor slots: surface the authoritative subtype (Cloth/Leather/Mail/Plate) when known.
+                var sub = TryGetSubType(character, slot);
+                if (!string.IsNullOrWhiteSpace(sub)) typePart = $" [{sub}]";
+            }
+
+            lines.Add($"- {label}: {name}{idPart}{typePart}");
+        }
+
+        if (lines.Count == 0) return "";
+
+        return
+            "Equipped gear (authoritative source for the transmog — render each named piece to match its " +
+            "actual in-game model, do not substitute generic class armor): " +
+            string.Join(" ", lines) +
+            " Each entry is a real World of Warcraft: The Burning Crusade Classic item; match its distinctive " +
+            "shape, color, and material rather than inventing an appearance.";
+    }
+
     private static string TryExtractItemName(CharacterRecord character, string slot)
     {
         if (!character.GearLinks.TryGetValue(slot, out var link) || string.IsNullOrWhiteSpace(link))
@@ -197,14 +264,56 @@ public static class HeroShotPromptBuilder
         return match.Success ? match.Groups["name"].Value.Trim() : "";
     }
 
+    /// <summary>Authoritative main-hand type: the in-client item subtype when captured, else keyword inference.</summary>
+    private static string ResolveMainHandType(CharacterRecord character)
+    {
+        var fromSub = NormalizeWeaponSubType(TryGetSubType(character, "mainhand"));
+        if (!string.IsNullOrWhiteSpace(fromSub)) return fromSub;
+        return InferMainHandType(TryExtractItemName(character, "mainhand"));
+    }
+
+    /// <summary>Authoritative off-hand type: shields are unambiguous from the subtype; otherwise fall
+    /// back to keyword inference on the name (foci/tomes/orbs report a generic "Miscellaneous" subtype).</summary>
+    private static string ResolveOffHandType(CharacterRecord character)
+    {
+        var sub = TryGetSubType(character, "offhand");
+        if (sub.Contains("shield", StringComparison.OrdinalIgnoreCase)) return "shield";
+        return InferOffHandType(TryExtractItemName(character, "offhand"));
+    }
+
+    private static string TryGetSubType(CharacterRecord character, string slot)
+        => character.GearSubTypes.TryGetValue(slot, out var s) && !string.IsNullOrWhiteSpace(s) ? s.Trim() : "";
+
+    /// <summary>Maps a WoW weapon subtype string ("One-Handed Swords", "Daggers", …) to this builder's
+    /// coarse type vocabulary. Returns "" for subtypes it doesn't recognize so a caller can fall back.</summary>
+    private static string NormalizeWeaponSubType(string subtype)
+    {
+        var t = subtype.ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(t)) return "";
+        if (t.Contains("dagger")) return "dagger";
+        if (t.Contains("sword")) return "sword";
+        if (t.Contains("axe")) return "axe";
+        if (t.Contains("mace")) return "mace";
+        if (t.Contains("staff") || t.Contains("stave")) return "staff";
+        if (t.Contains("polearm")) return "polearm";
+        if (t.Contains("fist")) return "fist weapon";
+        if (t.Contains("wand")) return "wand";
+        if (t.Contains("crossbow")) return "crossbow";
+        if (t.Contains("bow")) return "bow";
+        if (t.Contains("gun")) return "gun";
+        return "";
+    }
+
     private static string InferMainHandType(string itemName)
     {
         var text = itemName.ToLowerInvariant();
         if (string.IsNullOrWhiteSpace(text)) return "";
         if (ContainsAny(text, "staff", "stave")) return "staff";
         if (ContainsAny(text, "mace", "hammer", "gavel", "maul")) return "mace";
-        if (ContainsAny(text, "sword", "blade", "saber", "rapier")) return "sword";
+        // Daggers first: many daggers are named "…blade" (e.g. Mindblade), so the ambiguous
+        // "blade" token is deliberately NOT in the sword bucket — it would mis-type them as swords.
         if (ContainsAny(text, "dagger", "shiv", "dirk", "stiletto", "kris")) return "dagger";
+        if (ContainsAny(text, "sword", "saber", "rapier", "claymore", "greatsword", "scimitar")) return "sword";
         if (ContainsAny(text, "axe", "hatchet", "cleaver")) return "axe";
         if (ContainsAny(text, "fist", "claw", "gauntlet")) return "fist weapon";
         if (ContainsAny(text, "polearm", "halberd", "glaive", "spear")) return "polearm";

@@ -57,7 +57,7 @@ public sealed class CodexImagegenProvider : IHeroShotRenderProvider
                 ? new HashSet<string>(Directory.EnumerateFiles(genDir, "*.png", SearchOption.AllDirectories), StringComparer.OrdinalIgnoreCase)
                 : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            var prompt = BuildPrompt(request.Prompt, refTempPath);
+            var prompt = BuildPrompt(request.Prompt, refTempPath, codexCfg.EnableWebSearch);
             var codexExe = string.IsNullOrWhiteSpace(codexCfg.CodexExecutable) ? "codex" : codexCfg.CodexExecutable;
             var args = BuildArguments(codexCfg, verdictPath);
 
@@ -172,6 +172,8 @@ public sealed class CodexImagegenProvider : IHeroShotRenderProvider
         sb.Append(" --skip-git-repo-check");
         sb.Append(" --sandbox workspace-write");
         sb.Append(" -c model_reasoning_effort=").Append(cfg.ReasoningEffort);
+        if (cfg.EnableWebSearch)
+            sb.Append(" -c web_search=live");
         if (!string.IsNullOrWhiteSpace(cfg.ExtraArgs))
             sb.Append(' ').Append(cfg.ExtraArgs.Trim());
         sb.Append(" -o ").Append(Q(verdictPath));
@@ -180,11 +182,20 @@ public sealed class CodexImagegenProvider : IHeroShotRenderProvider
 
     // ── prompt ──────────────────────────────────────────────────────────────
 
-    private static string BuildPrompt(string corePrompt, string? refTempPath)
+    private static string BuildPrompt(string corePrompt, string? refTempPath, bool webSearchEnabled)
     {
         var sb = new StringBuilder();
         sb.AppendLine("Use the imagegen skill (the built-in image_gen tool) to generate ONE image.");
         sb.AppendLine();
+
+        if (webSearchEnabled)
+        {
+            sb.AppendLine("Some equipped items are named in the prompt below with their WoW item IDs. You have web " +
+                          "access — before generating, look up any item whose in-game appearance you are unsure of " +
+                          "(e.g. https://www.wowhead.com/tbc/item=<id>) so the rendered transmog matches the real model. " +
+                          "Do not fall back to generic armor when a specific item is named.");
+            sb.AppendLine();
+        }
 
         if (!string.IsNullOrWhiteSpace(refTempPath))
         {

@@ -57,17 +57,20 @@ public sealed class SavedVariablesCharacterSource
 
             var gearIds = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             var gearLinks = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var gearSubTypes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var slot in CharacterRecord.GearSlots)
             {
                 var id = ReadInt(t, $"gearid_{slot}");
                 var link = ReadString(t, $"gearlink_{slot}");
+                var subType = ReadString(t, $"gearsubtype_{slot}");
                 if (id <= 0)
                 {
                     id = PathTools.ExtractItemId(link);
                 }
                 if (id > 0) gearIds[slot] = id;
                 if (!string.IsNullOrWhiteSpace(link)) gearLinks[slot] = link;
+                if (!string.IsNullOrWhiteSpace(subType)) gearSubTypes[slot] = subType;
             }
 
             var record = new CharacterRecord
@@ -83,7 +86,8 @@ public sealed class SavedVariablesCharacterSource
                 Level = ReadInt(t, "level"),
                 LastUpdateEpoch = ReadLong(t, "lastUpdate"),
                 GearItemIds = gearIds,
-                GearLinks = gearLinks
+                GearLinks = gearLinks,
+                GearSubTypes = gearSubTypes
             };
 
             list.Add(record);

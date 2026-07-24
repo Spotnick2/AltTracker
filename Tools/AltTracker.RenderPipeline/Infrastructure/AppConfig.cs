@@ -71,6 +71,10 @@ public sealed class AppConfig
             public int TimeoutSeconds { get; set; } = 360;
             /// <summary>Optional extra args appended to `codex exec` (advanced; e.g. `-m &lt;model&gt;`).</summary>
             public string ExtraArgs { get; set; } = "";
+            /// <summary>When true, enables codex's web-search tool (`-c web_search=live`) so it can look up
+            /// each named item's real in-game appearance (e.g. on Wowhead) before generating. More accurate
+            /// transmog, but adds a browsing step per render and consumes OpenAI usage. Default off.</summary>
+            public bool EnableWebSearch { get; set; } = false;
         }
     }
 
