@@ -40,6 +40,9 @@ public static class HeroShotPromptBuilder
                $"{petSection}" +
                $"Background: {background} " +
                $"{styleDesc}. " +
+               "Framing: show the ENTIRE character from head to feet with clear empty padding on all sides — " +
+               "leave visible headroom above the top of the head and space below the feet, and keep the hands and " +
+               "weapon inside the frame. The head and feet must never touch or be cropped by the image edges. " +
                "Clean heroic dark-fantasy imagery with no gore, wounds, blood, or injury. " +
                "No text, no nameplate, no UI elements, no watermarks, no floating icons.";
     }
@@ -57,7 +60,8 @@ public static class HeroShotPromptBuilder
         if (hasReferenceImage)
             return $"{action} " +
                    "The provided screenshot shows the desired composition and depth-of-field style: " +
-                   "the character is rendered in sharp focus and fills most of the frame, " +
+                   "the character is rendered in sharp focus as the clear focal point, sized to leave comfortable " +
+                   "empty margins on every side (headroom above the head, space below the feet), " +
                    "while the background is heavily blurred with soft bokeh, exactly like the WoW character selection screen. " +
                    "Reproduce that same framing and depth-of-field treatment. " +
                    "Use the screenshot as the reference for the character's IDENTITY ONLY: race, skin tone, facial features, " +
