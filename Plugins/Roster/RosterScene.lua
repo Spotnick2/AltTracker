@@ -241,6 +241,14 @@ local function EnsureCard(i)
     card.name:SetWordWrap(false)
     if card.name.SetMaxLines then card.name:SetMaxLines(1) end
 
+    -- info-card text (no-render fallback): race+class, and level+iLvl
+    card.sub = card:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    card.sub:SetJustifyH("CENTER"); card.sub:SetWordWrap(false)
+    card.sub:Hide()
+    card.info = card:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    card.info:SetJustifyH("CENTER"); card.info:SetWordWrap(false)
+    card.info:Hide()
+
     card:SetScript("OnClick", function(self)
         if self.char and api.onSelect then api.onSelect(self.char.guid) end
     end)
@@ -305,6 +313,8 @@ local function BindCutoutTarget(card, char, isSelected, xCenter, targetH, bright
     card.plate:Hide()
     HideBorder(card)
     card.classIcon:Hide()
+    card.sub:Hide()
+    card.info:Hide()
 
     card.portrait:ClearAllPoints()
     card.portrait:SetAllPoints(card)
@@ -339,69 +349,76 @@ local function BindCutoutTarget(card, char, isSelected, xCenter, targetH, bright
     card:Show()
 end
 
--- ── Framed-card binding (Phase A fallback) ──────────────────────────────────
-local function BindCard(card, char, selected, cardW, cardH, x)
+-- ── Character info-card (no-cutout fallback) ────────────────────────────────
+-- Shown when a character has no rendered cutout: a class-icon + name + race/class +
+-- level/iLvl card (the List view's identity card, per slot), over the same backdrop.
+local function BindCard(card, char, selected, cardW, cardH, x, y)
     card.char = char
     card._carousel = false
-    card._c = nil   -- drop carousel tween state so re-entering cutout mode snaps
+    card._c = nil   -- drop any carousel tween state
     card:EnableMouse(true)
 
     card:ClearAllPoints()
     card:SetSize(cardW, cardH)
-    card:SetPoint("TOPLEFT", root, "TOPLEFT", x, -CARD_TOP)
-    AltTracker.ApplyBGOnly(card, 0.05, 0.05, 0.065, 0.92)
+    card:SetPoint("TOPLEFT", root, "TOPLEFT", x, y)
+    card:SetFrameLevel(selected and (card._baseLevel + 10) or card._baseLevel)
 
     local classToken = (char.class or ""):upper()
-    local portraitW = cardW - CARD_INSET * 2
-    local portraitH = cardH - CARD_INSET - PLATE_H
+    local r, g, b = ClassRGB(classToken)
 
-    card.portrait:ClearAllPoints()
-    card.portrait:SetPoint("TOPLEFT", card, "TOPLEFT", CARD_INSET, -CARD_INSET)
-    card.portrait:SetPoint("BOTTOMRIGHT", card, "BOTTOMRIGHT", -CARD_INSET, PLATE_H)
-    card.portrait:SetVertexColor(1, 1, 1)
+    card.portrait:Hide()
+    card.plate:Hide()
 
-    local path, srcW, srcH = api.resolvePortrait and api.resolvePortrait(char)
-    if path and LoadTexture(card.portrait, path) then
-        local u1, u2, v1, v2 = CoverTexCoord(portraitW, portraitH, tonumber(srcW) or DEFAULT_SRC_W, tonumber(srcH) or DEFAULT_SRC_H)
-        card.portrait:SetTexCoord(u1, u2, v1, v2)
-        card.portrait:Show()
-        card.classIcon:Hide()
-    else
-        card.portrait:Hide()
-        if api.classIconPath then
-            card.classIcon:ClearAllPoints()
-            card.classIcon:SetSize(56, 56)
-            card.classIcon:SetPoint("CENTER", card, "CENTER", 0, PLATE_H / 2)
-            card.classIcon:SetTexture(api.classIconPath(classToken))
-            card.classIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-        end
-        card.classIcon:Show()
+    -- class icon, upper area
+    local iconSize = math.max(28, math.min(cardW * 0.44, cardH * 0.40))
+    card.classIcon:ClearAllPoints()
+    card.classIcon:SetSize(iconSize, iconSize)
+    card.classIcon:SetPoint("TOP", card, "TOP", 0, -math.max(8, cardH * 0.10))
+    if api.classIconPath then
+        card.classIcon:SetTexture(api.classIconPath(classToken))
+        card.classIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
     end
+    card.classIcon:Show()
 
-    card.plate:ClearAllPoints()
-    card.plate:SetHeight(PLATE_H)
-    card.plate:SetPoint("BOTTOMLEFT", card, "BOTTOMLEFT", 0, 0)
-    card.plate:SetPoint("BOTTOMRIGHT", card, "BOTTOMRIGHT", 0, 0)
-    card.plate:Show()
-
+    -- name
     card.name:ClearAllPoints()
-    card.name:SetPoint("LEFT", card.plate, "LEFT", 6, 0)
-    card.name:SetPoint("RIGHT", card.plate, "RIGHT", -6, 0)
+    card.name:SetPoint("TOP", card.classIcon, "BOTTOM", 0, -6)
+    card.name:SetPoint("LEFT", card, "LEFT", 4, 0)
+    card.name:SetPoint("RIGHT", card, "RIGHT", -4, 0)
+    card.name:SetFontObject("GameFontNormal")
     card.name:SetText(char.name or "?")
     card.name:Show()
 
+    -- race + class
+    local className = (api.classDisplay and api.classDisplay(classToken)) or (char.class or "")
+    local race = (api.raceDisplay and api.raceDisplay(char)) or ""
+    card.sub:ClearAllPoints()
+    card.sub:SetPoint("TOP", card.name, "BOTTOM", 0, -3)
+    card.sub:SetPoint("LEFT", card, "LEFT", 3, 0)
+    card.sub:SetPoint("RIGHT", card, "RIGHT", -3, 0)
+    card.sub:SetText((race ~= "" and (race .. " ") or "") .. (className or ""))
+    card.sub:SetTextColor(0.76, 0.76, 0.80)
+    card.sub:Show()
+
+    -- level + iLvl, along the bottom
+    card.info:ClearAllPoints()
+    card.info:SetPoint("BOTTOM", card, "BOTTOM", 0, 7)
+    card.info:SetPoint("LEFT", card, "LEFT", 3, 0)
+    card.info:SetPoint("RIGHT", card, "RIGHT", -3, 0)
+    local ilvlStr = (char.ilvl and char.ilvl > 0) and string.format("  |  iLvl %.1f", char.ilvl) or ""
+    card.info:SetText(string.format("Level %d%s", char.level or 0, ilvlStr))
+    card.info:SetTextColor(0.66, 0.71, 0.85)
+    card.info:Show()
+
     if selected then
         local ar, ag, ab = AccentRGB()
+        AltTracker.ApplyBGOnly(card, ar * 0.16, ag * 0.16, ab * 0.16, 0.90)
         SetBorder(card, 2, ar, ag, ab, 1); ShowBorder(card)
-        card.plate:SetColorTexture(ar * 0.35, ag * 0.35, ab * 0.35, 0.95)
         card.name:SetTextColor(1, 1, 1)
-        card:SetFrameLevel(card._baseLevel + 10)
     else
-        SetBorder(card, 1, 0.22, 0.22, 0.26, 0.9); ShowBorder(card)
-        card.plate:SetColorTexture(0.05, 0.05, 0.06, 0.9)
-        local r, g, b = ClassRGB(classToken)
+        AltTracker.ApplyBGOnly(card, 0.06, 0.06, 0.08, 0.82)
+        SetBorder(card, 1, 0.24, 0.24, 0.28, 0.9); ShowBorder(card)
         card.name:SetTextColor(r, g, b)
-        card:SetFrameLevel(card._baseLevel)
     end
 
     card:Show()
@@ -679,16 +696,24 @@ function RosterScene.Render(camp, selectedGuid)
             else root.arrowPrev:Hide(); root.arrowNext:Hide() end
         end
     else
-        -- Phase A framed-card fallback
+        -- No cutouts (e.g. no Codex renders): a centered grid of character info-cards.
         if root.arrowPrev then root.arrowPrev:Hide(); root.arrowNext:Hide() end
-        local cardW = math.max(1, math.min(CARD_MAX_W, (rW - CARD_GAP * (n + 1)) / n))
-        local cardH = math.max(1, rH - CARD_TOP - CARD_BOTTOM)
-        local totalW = cardW * n + CARD_GAP * (n - 1)
-        local startX = math.max(CARD_GAP, (rW - totalW) * 0.5)
+        local gap  = 12
+        local cols = (n <= 4) and n or math.ceil(n / 2)
+        local rows = math.ceil(n / cols)
+        local cardW = math.max(1, math.min(200, (rW - gap * (cols + 1)) / cols))
+        local cardH = math.max(1, math.min(250, (rH - gap * (rows + 1)) / rows))
+        local gridW = cardW * cols + gap * (cols - 1)
+        local gridH = cardH * rows + gap * (rows - 1)
+        local startX = (rW - gridW) * 0.5
+        local startY = (rH - gridH) * 0.5
         for i = 1, n do
             local card = EnsureCard(i)
-            local char = camp[i]
-            BindCard(card, char, char.guid == selectedGuid, cardW, cardH, startX + (i - 1) * (cardW + CARD_GAP))
+            local col  = (i - 1) % cols
+            local row  = math.floor((i - 1) / cols)
+            local x = startX + col * (cardW + gap)
+            local y = -(startY + row * (cardH + gap))
+            BindCard(card, camp[i], camp[i].guid == selectedGuid, cardW, cardH, x, y)
         end
     end
 
