@@ -2353,39 +2353,48 @@ local function CreateFrameIfNeeded()
 
     Y = Y - 44   -- a bit more room for the mid-tick baseline below the slider
 
-    -- ── Roster section ──────────────────────────────────────
-    local optCharsHdr = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    optCharsHdr:SetPoint("TOPLEFT", P, Y)
-    optCharsHdr:SetText("ROSTER")
-    optCharsHdr:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
-    Y = Y - 20
+    -- ── Roster section (developer-only) ─────────────────────
+    -- "Preview debug mode" is a developer diagnostic (live model vs static
+    -- render vs card, plus the Roster debug text window) that normal users
+    -- should never see. Gate the whole block behind a dev flag; enable with
+    --   /run AltTrackerConfig.devMode = true; ReloadUI()
+    -- When the flag is off nothing renders and Y is untouched, so the options
+    -- below simply move up. Issue #4.
+    if AltTrackerConfig and AltTrackerConfig.devMode then
+        local optCharsHdr = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        optCharsHdr:SetPoint("TOPLEFT", P, Y)
+        optCharsHdr:SetText("ROSTER (DEV)")
+        optCharsHdr:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+        Y = Y - 20
 
-    local optModelDebugCheck = CreateFrame("CheckButton", nil, optionsFrame, "UICheckButtonTemplate")
-    optModelDebugCheck:SetSize(18, 18)
-    optModelDebugCheck:SetPoint("TOPLEFT", P - 2, Y + 2)
-    optModelDebugCheck:SetScript("OnClick", function(self)
-        AltTrackerRosterDB = AltTrackerRosterDB or AltTrackerAltsDB or {}
-        AltTrackerAltsDB = AltTrackerRosterDB
-        AltTrackerRosterDB._debugModelStatus = self:GetChecked() and true or false
-        if AltTracker.RefreshSheet then
-            AltTracker.RefreshSheet()
-        end
-    end)
+        local optModelDebugCheck = CreateFrame("CheckButton", nil, optionsFrame, "UICheckButtonTemplate")
+        optModelDebugCheck:SetSize(18, 18)
+        optModelDebugCheck:SetPoint("TOPLEFT", P - 2, Y + 2)
+        optModelDebugCheck:SetChecked(AltTrackerRosterDB and AltTrackerRosterDB._debugModelStatus and true or false)
+        optModelDebugCheck:SetScript("OnClick", function(self)
+            AltTrackerRosterDB = AltTrackerRosterDB or AltTrackerAltsDB or {}
+            AltTrackerAltsDB = AltTrackerRosterDB
+            AltTrackerRosterDB._debugModelStatus = self:GetChecked() and true or false
+            if AltTracker.RefreshSheet then
+                AltTracker.RefreshSheet()
+            end
+        end)
 
-    local optModelDebugLabel = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    optModelDebugLabel:SetPoint("LEFT", optModelDebugCheck, "RIGHT", 4, 0)
-    optModelDebugLabel:SetText("Preview debug mode (AltTracker Roster)")
-    optModelDebugLabel:SetTextColor(unpack(AltTracker.C.TEXT_NORM))
+        local optModelDebugLabel = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        optModelDebugLabel:SetPoint("LEFT", optModelDebugCheck, "RIGHT", 4, 0)
+        optModelDebugLabel:SetText("Preview debug mode (AltTracker Roster)")
+        optModelDebugLabel:SetTextColor(unpack(AltTracker.C.TEXT_NORM))
 
-    local optModelDebugHint = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    optModelDebugHint:SetPoint("TOPLEFT", P, Y - 16)
-    optModelDebugHint:SetPoint("RIGHT", optionsFrame, "RIGHT", -P, 0)
-    optModelDebugHint:SetJustifyH("LEFT")
-    optModelDebugHint:SetWordWrap(true)
-    optModelDebugHint:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
-    optModelDebugHint:SetText("Shows preview mode diagnostics (live model vs static render vs card) and opens the Roster debug text window.")
+        local optModelDebugHint = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        optModelDebugHint:SetPoint("TOPLEFT", P, Y - 16)
+        optModelDebugHint:SetPoint("RIGHT", optionsFrame, "RIGHT", -P, 0)
+        optModelDebugHint:SetJustifyH("LEFT")
+        optModelDebugHint:SetWordWrap(true)
+        optModelDebugHint:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+        optModelDebugHint:SetText("Shows preview mode diagnostics (live model vs static render vs card) and opens the Roster debug text window.")
 
-    Y = Y - 42
+        Y = Y - 42
+    end
 
     -- Shared builder for the checkbox rows below (plugins, presentation,
     -- toasts). Defined here so the Plugins section can use it too.
