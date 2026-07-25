@@ -2230,16 +2230,27 @@ local function CreateFrameIfNeeded()
 
     -- Refresh theme button highlight (no callbacks, no side effects)
     -- Must NOT call ApplyTheme or SwitchSection
+    -- The selected theme gets a persistent pressed state: accent-filled
+    -- background + accent border + accent label. Text color alone was too
+    -- subtle to read as "active" at a glance (issue #5).
+    local function SetThemeBtnState(btn, lbl, active)
+        local ar, ag, ab = AltTracker.GetAccentRGB()
+        if active then
+            btn:SetBackdropColor(
+                AltTracker.C.BG_BTN_ACTIVE[1], AltTracker.C.BG_BTN_ACTIVE[2],
+                AltTracker.C.BG_BTN_ACTIVE[3], AltTracker.C.BG_BTN_ACTIVE[4])
+            btn:SetBackdropBorderColor(ar, ag, ab, 1)
+            lbl:SetTextColor(ar, ag, ab)
+        else
+            btn:SetBackdropColor(0.12, 0.12, 0.12, 1)
+            btn:SetBackdropBorderColor(0, 0, 0, 1)
+            lbl:SetTextColor(unpack(AltTracker.C.TEXT_NORM))
+        end
+    end
     local function RefreshThemeBtns()
         local cur = AltTrackerConfig and AltTrackerConfig.theme or "dark"
-        local ar, ag, ab = AltTracker.GetAccentRGB()
-        if cur == "dark" then
-            optDarkLbl:SetTextColor(ar, ag, ab)
-            optClassLbl:SetTextColor(unpack(AltTracker.C.TEXT_NORM))
-        else
-            optDarkLbl:SetTextColor(unpack(AltTracker.C.TEXT_NORM))
-            optClassLbl:SetTextColor(ar, ag, ab)
-        end
+        SetThemeBtnState(optDarkBtn,  optDarkLbl,  cur == "dark")
+        SetThemeBtnState(optClassBtn, optClassLbl, cur ~= "dark")
     end
     -- Sync when accent changes (sidebar callback won't call SwitchSection)
     AltTracker.RegisterThemeCallback(function()
