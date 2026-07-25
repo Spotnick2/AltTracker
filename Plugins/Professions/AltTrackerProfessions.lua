@@ -859,9 +859,13 @@ local function BuildEntries()
 end
 
 local function EntryPassesFilters(entry, searchText, charsInView)
+    local searching = (searchText and searchText ~= "")
     if activeProf and entry.profName ~= activeProf then return false end
-    if not PassesExpansion(entry) then return false end
-    if searchText and searchText ~= "" then
+    -- While the user is searching, match across ALL expansions so a hit isn't
+    -- hidden by the current expansion filter — without silently changing the
+    -- expansion control (issue #12). Clearing the search restores the filter.
+    if not searching and not PassesExpansion(entry) then return false end
+    if searching then
         if not entry.recipe:lower():find(searchText, 1, true) then return false end
     end
     if showMissingOnly and charsInView then
@@ -873,64 +877,6 @@ local function EntryPassesFilters(entry, searchText, charsInView)
         if not missingAny then return false end
     end
     return true
-end
-
-------------------------------------------------------------
--- Smart search auto-context
-------------------------------------------------------------
-
-local function MaybeAutoContextSearch(searchText)
-    if not searchText or searchText == "" then return end
-    if activeProf then return end
-    local bestProf, bestScore
-    local q = searchText:lower()
-
-    -- Pass A: scanned recipes (what the user's alts have learned)
-    for guid, data in IterCharacters() do
-        if type(data) == "table" and type(data.recipes) == "table" then
-            for profName, recipeList in pairs(data.recipes) do
-                if TRACKABLE_PROFESSIONS[profName] and type(recipeList) == "table" then
-                    for _, r in ipairs(recipeList) do
-                        local n = (r.name or ""):lower()
-                        local idx = n:find(q, 1, true)
-                        if idx then
-                            local score = (idx - 1) * 1000 + #n
-                            if not bestScore or score < bestScore then
-                                bestScore = score
-                                bestProf  = profName
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    -- Pass B: static recipe DB.  Same scoring.  Lets the user search
-    -- for a recipe they haven't learned yet and still snap to the
-    -- correct profession context.
-    if AltTracker_RecipeDB and AltTracker_RecipeDB.GetRecipes then
-        for profName in pairs(TRACKABLE_PROFESSIONS) do
-            local list = AltTracker_RecipeDB.GetRecipes(profName)
-            for _, s in ipairs(list) do
-                local n = (s.name or ""):lower()
-                local idx = n:find(q, 1, true)
-                if idx then
-                    local score = (idx - 1) * 1000 + #n
-                    if not bestScore or score < bestScore then
-                        bestScore = score
-                        bestProf  = profName
-                    end
-                end
-            end
-        end
-    end
-
-    if bestProf then
-        activeProf      = bestProf
-        activeExpansion = "all"
-        if AT_PROFS._RestyleFilterButtons then AT_PROFS._RestyleFilterButtons() end
-    end
 end
 
 ------------------------------------------------------------
@@ -1273,8 +1219,11 @@ local function SetExpansionFilter(expKey)
 end
 
 local function SetProfessionFilter(profName)
+    -- Selecting a profession no longer force-resets the expansion filter to
+    -- "all" (issue #12): the two filters are independent and neither changes
+    -- the other behind the user's back. The expansion filter keeps whatever
+    -- the user last chose.
     activeProf = profName
-    if profName then activeExpansion = "all" end
     AT_PROFS._RestyleFilterButtons()
     AT_PROFS.RefreshResults()
 end
@@ -1361,18 +1310,34 @@ local function BuildPanel(mainFrame)
     searchBox:SetAutoFocus(false)
     searchBox:SetMaxLetters(80)
     searchBox:SetScript("OnTextChanged", function(self, userInput)
-        if userInput then
-            local text = strtrim(self:GetText() or ""):lower()
-            MaybeAutoContextSearch(text)
-        end
+        -- Search spans all professions/expansions via EntryPassesFilters and
+        -- no longer auto-changes the profession or expansion filters (issue #12).
         AT_PROFS.RefreshResults()
     end)
     searchBox:SetScript("OnEscapePressed", function(self) self:SetText(""); self:ClearFocus() end)
 
-    local clearBtn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    -- Flat themed Clear button. Was UIPanelButtonTemplate — the only stock
+    -- Blizzard control in the panel; its embossed gold styling read as a
+    -- foreign, reddish button (issue #11). Matches the exp/prof filter
+    -- buttons: dark idle, accent border/label on hover.
+    local clearBtn = CreateFrame("Button", nil, panel, "BackdropTemplate")
     clearBtn:SetSize(50, 22)
     clearBtn:SetPoint("LEFT", searchBox, "RIGHT", 6, 0)
-    clearBtn:SetText("Clear")
+    AltTracker.ApplyBackdrop(clearBtn, 0.10, 0.10, 0.10, 1)
+    local clearLbl = clearBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    clearLbl:SetAllPoints(); clearLbl:SetJustifyH("CENTER"); clearLbl:SetText("Clear")
+    clearLbl:SetTextColor(0.60, 0.60, 0.60)
+    clearBtn:SetScript("OnEnter", function()
+        local ar, ag, ab = AltTracker.GetAccentRGB()
+        clearBtn:SetBackdropColor(0.18, 0.18, 0.18, 1)
+        clearBtn:SetBackdropBorderColor(ar, ag, ab, 1)
+        clearLbl:SetTextColor(ar, ag, ab)
+    end)
+    clearBtn:SetScript("OnLeave", function()
+        clearBtn:SetBackdropColor(0.10, 0.10, 0.10, 1)
+        clearBtn:SetBackdropBorderColor(0, 0, 0, 1)
+        clearLbl:SetTextColor(0.60, 0.60, 0.60)
+    end)
     clearBtn:SetScript("OnClick", function() searchBox:SetText(""); searchBox:ClearFocus() end)
 
     -- "Show only unknown" toggle
@@ -1407,8 +1372,8 @@ local function BuildPanel(mainFrame)
         return b
     end
 
-    local expBC      = MakeExpButton("bc",      "Burning Crusade",   expLabel, 8)
-    local expClassic = MakeExpButton("classic", "World of Warcraft", expBC,    6)
+    local expBC      = MakeExpButton("bc",      "Burning Crusade", expLabel, 8)
+    local expClassic = MakeExpButton("classic", "Classic",         expBC,    6)
     MakeExpButton("all", "Everything", expClassic, 6)
 
     -- Profession filter row
@@ -1816,8 +1781,13 @@ function AT_PROFS.Activate(mainFrame)
 
     -- Recipes benefits from more vertical space for the scroll list.
     -- SetSize changes only the dimensions; the frame stays at its current position.
+    -- Remember the size first so Deactivate can restore it — otherwise switching
+    -- away leaves the shared window stuck at the plugin's dimensions (issue #16).
     local f = _G["AltTrackerSheet"]
-    if f then f:SetSize(1050, 490) end
+    if f then
+        AT_PROFS._priorFrameSize = AT_PROFS._priorFrameSize or { f:GetWidth(), f:GetHeight() }
+        f:SetSize(1050, 490)
+    end
 
     panel:Show()
     AT_PROFS.RefreshResults()
@@ -1840,6 +1810,13 @@ end
 function AT_PROFS.Deactivate(mainFrame)
     AT_PROFS.isActive = false
     if panel then panel:Hide() end
+
+    -- Restore the window to the size it had before we grew it (issue #16).
+    local f = _G["AltTrackerSheet"]
+    if f and AT_PROFS._priorFrameSize then
+        f:SetSize(AT_PROFS._priorFrameSize[1], AT_PROFS._priorFrameSize[2])
+        AT_PROFS._priorFrameSize = nil
+    end
 
     if mainFrame.bodyScroll   then mainFrame.bodyScroll:Show()   end
     if mainFrame.frozenScroll then mainFrame.frozenScroll:Show() end
