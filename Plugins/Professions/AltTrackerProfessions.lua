@@ -1612,7 +1612,8 @@ function AT_PROFS.RefreshResults()
             sec.icon:SetTexture(PROF_ICONS[e.profName] or PROF_RECIPE_PLACEHOLDER[e.profName])
             sec.label:SetText(e.profName)
             local profTotal = profTotals[e.profName] or 0
-            sec.count:SetText(string.format("|cffaaaaaa(%d recipes)|r", profTotal))
+            local profNoun  = (profTotal == 1) and "recipe" or "recipes"
+            sec.count:SetText(string.format("|cffaaaaaa(%d %s)|r", profTotal, profNoun))
 
             -- Per-character known counts, one cell per char column,
             -- aligned with the matrix char columns below.  Each cell
