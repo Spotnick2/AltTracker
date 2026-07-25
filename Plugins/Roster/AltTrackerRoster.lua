@@ -383,7 +383,10 @@ local function DurationText(sec)
     local m = math.floor((sec % 3600) / 60)
     if d > 0 then return string.format("%dd %dh", d, h) end
     if h > 0 then return string.format("%dh %dm", h, m) end
-    return string.format("%dm", m)
+    if m > 0 then return string.format("%dm", m) end
+    -- Under a minute but not ready yet: d/h/m all floor to 0, which used to
+    -- render a misleading "0m". Show "<1m" instead (issue #14).
+    return "<1m"
 end
 
 local function StandingInfo(standing)
@@ -722,10 +725,32 @@ local function EnsureSelectorRow(i)
     row:SetScript("OnEnter", function(self)
         self.isHovered = true
         RenderSelector()
+        -- Row name/sub are single-line (SetMaxLines(1)) so long names, specs,
+        -- and the guild/realm/faction line get silently cut. Reveal the full
+        -- text on hover (issue #15).
+        local entry = self.entry
+        if entry and entry.kind ~= "group" and entry.data then
+            local char = entry.data
+            local classToken = (char.class or ""):upper()
+            local className  = CLASS_DISPLAY[classToken] or (char.class or "Unknown")
+            local spec = (char.spec and char.spec ~= "") and char.spec or nil
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:ClearLines()
+            GameTooltip:AddLine((AltTracker.ClassColor and AltTracker.ClassColor(classToken) or "") .. (char.name or "") .. "|r")
+            GameTooltip:AddLine(spec
+                and string.format("Level %d %s %s", char.level or 0, spec, className)
+                or  string.format("Level %d %s", char.level or 0, className), 0.8, 0.8, 0.8)
+            local guildLine = GuildFactionLine(char)
+            if guildLine and guildLine ~= "" then
+                GameTooltip:AddLine(guildLine, 0.6, 0.6, 0.6)
+            end
+            GameTooltip:Show()
+        end
     end)
     row:SetScript("OnLeave", function(self)
         self.isHovered = false
         RenderSelector()
+        GameTooltip:Hide()
     end)
     row.isHovered = false
 
@@ -756,7 +781,8 @@ RenderSelector = function()
             row.name:SetText(g.realm .. " |cffaaaaaa(" .. g.account .. ")|r")
             row.name:SetTextColor(unpack(AltTracker.C.TEXT_BRIGHT))
             row.ilvl:Show()
-            row.ilvl:SetText(string.format("%d chars", g.count or 0))
+            local gCount = g.count or 0
+            row.ilvl:SetText(string.format("%d %s", gCount, gCount == 1 and "char" or "chars"))
             row.ilvl:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
             row.sel:Hide()
             if row.isHovered then
@@ -2850,7 +2876,11 @@ local function UpdateFooter()
 
     local ar, ag, ab = AltTracker.GetAccentRGB()
     local accentHex = string.format("|cff%02x%02x%02x", ar * 255, ag * 255, ab * 255)
-    footerLeft:SetText(accentHex .. totalChars .. "|r |cffaaaaaachars  " .. accentHex .. totalLevel .. "|r |cffaaaaaatotal levels|r")
+    -- Pluralize on count so a single character reads "1 char" / "1 total level"
+    -- rather than "1 chars" / "1 total levels" (issue #14).
+    local charNoun  = (totalChars == 1) and "char" or "chars"
+    local levelNoun = (totalLevel == 1) and "total level" or "total levels"
+    footerLeft:SetText(accentHex .. totalChars .. "|r |cffaaaaaa" .. charNoun .. "  " .. accentHex .. totalLevel .. "|r |cffaaaaaa" .. levelNoun .. "|r")
     if ilvlCount > 0 then
         footerMid:SetText(string.format("|cffaaaaaa%.1f|r avg iLvl", ilvlTotal / ilvlCount))
     else
@@ -3268,6 +3298,17 @@ local function BuildDetailPanel()
     centerILvlBadgeValue:SetTextColor(0.95, 0.95, 0.95)
     centerILvlBadgeValue:SetText("-")
 
+    -- Explain the iLvl badge — the number was shown bare (issue #15).
+    badgeILvl:EnableMouse(true)
+    badgeILvl:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine("Item Level", 1, 1, 1)
+        GameTooltip:AddLine("Average item level across all equipped gear slots.", 0.8, 0.8, 0.8, true)
+        GameTooltip:Show()
+    end)
+    badgeILvl:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
     local badgeGS = CreateFrame("Frame", nil, centerIdentityPanel, "BackdropTemplate")
     badgeGS:SetSize(66, 34)
     badgeGS:SetPoint("TOP", centerRaceText, "BOTTOM", 38, -10)
@@ -3282,6 +3323,17 @@ local function BuildDetailPanel()
     centerGSBadgeValue:SetPoint("TOP", badgeGLabel, "BOTTOM", 0, -1)
     centerGSBadgeValue:SetTextColor(0.95, 0.95, 0.95)
     centerGSBadgeValue:SetText("-")
+
+    -- Explain the GearScore badge — the number was shown bare (issue #15).
+    badgeGS:EnableMouse(true)
+    badgeGS:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine("GearScore", 1, 1, 1)
+        GameTooltip:AddLine("Weighted score of equipped gear — each item's level times a per-slot weight (TBC GearScore formula). Higher is better; color shifts with bracket.", 0.8, 0.8, 0.8, true)
+        GameTooltip:Show()
+    end)
+    badgeGS:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
     centerSummaryText = centerIdentityPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     centerSummaryText:SetPoint("TOP", badgeILvl, "BOTTOM", 38, -10)
@@ -3538,8 +3590,14 @@ function AT_ALTS.Activate(mainFrame)
     if mainFrame.hScrollBar   then mainFrame.hScrollBar:Hide()   end
     if mainFrame.totalsBar    then mainFrame.totalsBar:Hide()    end
 
+    -- Remember the size first so Deactivate can restore it — otherwise
+    -- switching away leaves the shared window stuck at the plugin's
+    -- dimensions (issue #16).
     local f = _G["AltTrackerSheet"]
-    if f then f:SetSize(1120, 560) end
+    if f then
+        AT_ALTS._priorFrameSize = AT_ALTS._priorFrameSize or { f:GetWidth(), f:GetHeight() }
+        f:SetSize(1120, 560)
+    end
 
     panel:Show()
     local ui = GetUIState()
@@ -3551,6 +3609,13 @@ end
 function AT_ALTS.Deactivate(mainFrame)
     AT_ALTS.isActive = false
     if panel then panel:Hide() end
+
+    -- Restore the window to the size it had before we grew it (issue #16).
+    local f = _G["AltTrackerSheet"]
+    if f and AT_ALTS._priorFrameSize then
+        f:SetSize(AT_ALTS._priorFrameSize[1], AT_ALTS._priorFrameSize[2])
+        AT_ALTS._priorFrameSize = nil
+    end
 
     if mainFrame.bodyScroll   then mainFrame.bodyScroll:Show()   end
     if mainFrame.frozenScroll then mainFrame.frozenScroll:Show() end
