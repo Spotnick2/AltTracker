@@ -2085,7 +2085,7 @@ local function CreateFrameIfNeeded()
         local lbl=pbtn:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
         lbl:SetPoint("LEFT",52,0); lbl:SetPoint("RIGHT",-8,0)
         lbl:SetJustifyH("LEFT"); lbl:SetText(plugin.label)
-        lbl:SetTextColor(0.5,0.85,0.85)
+        lbl:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
         pbtn.lbl=lbl; pbtn.icon=icon
 
         pbtn:SetScript("OnClick",function()
@@ -2100,8 +2100,9 @@ local function CreateFrameIfNeeded()
             pbtn:SetBackdropColor(
                 AltTracker.C.BG_BTN_ACTIVE[1], AltTracker.C.BG_BTN_ACTIVE[2],
                 AltTracker.C.BG_BTN_ACTIVE[3], AltTracker.C.BG_BTN_ACTIVE[4])
-            stripe:SetColorTexture(0, 0.85, 0.85, 1); stripe:Show()
-            lbl:SetTextColor(0,1,0.9)
+            local ar, ag, ab = AltTracker.GetAccentRGB()
+            stripe:SetColorTexture(ar, ag, ab, 1); stripe:Show()
+            lbl:SetTextColor(ar, ag, ab)
             icon:SetAlpha(1.0)
             if activeSection._isPlugin and activeSection.OnDeactivate then
                 activeSection.OnDeactivate(frame)
@@ -2114,7 +2115,7 @@ local function CreateFrameIfNeeded()
                 pbtn:SetBackdropColor(
                     AltTracker.C.BG_BTN_HOVER[1], AltTracker.C.BG_BTN_HOVER[2],
                     AltTracker.C.BG_BTN_HOVER[3], AltTracker.C.BG_BTN_HOVER[4])
-                lbl:SetTextColor(0.7,1,1)
+                lbl:SetTextColor(unpack(AltTracker.C.TEXT_BRIGHT))
                 icon:SetAlpha(0.85)
             end
         end)
@@ -2123,7 +2124,7 @@ local function CreateFrameIfNeeded()
                 pbtn:SetBackdropColor(
                     AltTracker.C.BG_BTN_IDLE[1], AltTracker.C.BG_BTN_IDLE[2],
                     AltTracker.C.BG_BTN_IDLE[3], AltTracker.C.BG_BTN_IDLE[4])
-                lbl:SetTextColor(0.5,0.85,0.85)
+                lbl:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
                 icon:SetAlpha(0.78)
             end
         end)
