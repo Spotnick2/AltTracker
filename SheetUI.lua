@@ -1133,22 +1133,11 @@ local function UpdateTotalsBar()
     local ar, ag, ab = AltTracker.GetAccentRGB()
     local accentHex = string.format("|cff%02x%02x%02x", ar*255, ag*255, ab*255)
 
-    -- Rep section: show standing legend in the totals bar instead of char counts
-    if activeSection and activeSection.id == "rep" then
-        local legend = "|cff00ffffE|r Exalted  "
-            .. "|cff00ffccR|r Revered  "
-            .. "|cff00ff00H|r Honored  "
-            .. "|cff66ff66F|r Friendly  "
-            .. "|cffffffffN|r Neutral  "
-            .. "|cffff6600U|r Unfriendly  "
-            .. "|cffcc0000X|r Hated  "
-            .. "|cffaaaaaa- Unknown|r"
-        totalsBar.left:SetText(legend)
-        if totalsBar.mid then totalsBar.mid:SetText("") end
-        totalsBar.right:SetText(
-            accentHex .. totalChars .. "|r |cffaaaaaa chars|r")
-        return
-    end
+    -- The Reputations tab used to replace the totals bar entirely with the
+    -- standing legend (E/R/H/F/N/U/X/-), which dropped the char/level/gold
+    -- totals shown on every other tab. The footer now stays consistent across
+    -- all tabs; the standing key lives in the faction column header tooltips
+    -- instead (see REP_STANDING_LEGEND in BuildHeaders). Issue #8.
 
     -- Compute iLvl average across visible characters
     local totalIlvl, ilvlCount = 0, 0
@@ -1327,6 +1316,27 @@ local COL_TOOLTIPS = {
     gear_mainhand="Main Hand", gear_offhand="Off Hand", gear_ranged="Ranged",
 }
 
+-- Standing key for the reputation columns. Shown in each faction header's
+-- hover tooltip (issue #8) so the footer can keep the normal char/level/gold
+-- totals like every other tab. {letter, colorHex, name}.
+local REP_STANDING_LEGEND = {
+    { "E", "00ffff", "Exalted"    },
+    { "R", "00ffcc", "Revered"    },
+    { "H", "00ff00", "Honored"    },
+    { "F", "66ff66", "Friendly"   },
+    { "N", "ffffff", "Neutral"    },
+    { "U", "ff6600", "Unfriendly" },
+    { "X", "cc0000", "Hated"      },
+    { "-", "aaaaaa", "Unknown"    },
+}
+-- Append the standing key to a tooltip that's already SetOwner'd + open.
+local function AddRepStandingLegend(tt)
+    tt:AddLine(" ", 1, 1, 1)
+    for _, s in ipairs(REP_STANDING_LEGEND) do
+        tt:AddLine("|cff" .. s[2] .. s[1] .. "|r  |cffcccccc" .. s[3] .. "|r", 1, 1, 1)
+    end
+end
+
 local headerDividers = {}   -- textures created per BuildHeaders call, tracked for cleanup
 
 local function ClearHeaders()
@@ -1403,6 +1413,10 @@ local function BuildHeaders()
                     local check = "|TInterface\\RAIDFRAME\\ReadyCheck-Ready:12:12:0:0:64:64:4:60:4:60|t"
                     GameTooltip:AddLine("|cffaaaaaaPercent of gear slots holding a best-in-slot item.|r",1,1,1,true)
                     GameTooltip:AddLine(check.." |cffaaaaaamarks a BiS item in each gear-slot column.|r",1,1,1,true)
+                elseif col.type=="rep" or col.type=="repCombined" then
+                    -- Standing key lives here so the footer keeps normal
+                    -- char/level/gold totals like every other tab (issue #8).
+                    AddRepStandingLegend(GameTooltip)
                 end
                 GameTooltip:AddLine("Sort by "..col.label,0.7,0.7,0.7); GameTooltip:Show()
             end)
