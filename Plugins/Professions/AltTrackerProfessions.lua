@@ -1321,10 +1321,33 @@ local function BuildPanel(mainFrame)
         header:SetTextColor(r, g, b)
     end)
 
+    -- Legend. Use the SAME textures the grid draws (green check / dim gray X)
+    -- as real inline icons rather than Unicode ✓/✗ glyphs, which render as
+    -- placeholder boxes in the game font (issue #7: the two glyphs were
+    -- indistinguishable). The "not learned" icon mirrors the softened grid
+    -- marker — neutral gray, not saturated red.
+    local LEG_SZ = 13
+    local legCheck = panel:CreateTexture(nil, "OVERLAY")
+    legCheck:SetSize(LEG_SZ, LEG_SZ)
+    legCheck:SetPoint("LEFT", header, "RIGHT", 8, 0)
+    legCheck:SetTexture(CHECK_TEXTURE)
+
+    local legCheckTxt = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    legCheckTxt:SetPoint("LEFT", legCheck, "RIGHT", 3, 0)
+    legCheckTxt:SetTextColor(0.45, 0.45, 0.45)
+    legCheckTxt:SetText("= learned")
+
+    local legMiss = panel:CreateTexture(nil, "OVERLAY")
+    legMiss:SetSize(LEG_SZ, LEG_SZ)
+    legMiss:SetPoint("LEFT", legCheckTxt, "RIGHT", 12, 0)
+    legMiss:SetTexture(MISS_TEXTURE)
+    legMiss:SetVertexColor(0.5, 0.5, 0.5)
+    legMiss:SetAlpha(0.6)
+
     local hint = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    hint:SetPoint("LEFT", header, "RIGHT", 8, 0)
+    hint:SetPoint("LEFT", legMiss, "RIGHT", 3, 0)
     hint:SetTextColor(0.45, 0.45, 0.45)
-    hint:SetText("✓ = learned  ✗ = not learned  Click profession header to collapse")
+    hint:SetText("= not learned    Click profession header to collapse")
 
     -- Search
     local searchLabel = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -1746,11 +1769,14 @@ function AT_PROFS.RefreshResults()
                     cell.tex:SetVertexColor(1, 1, 1)
                     cell.tex:Show()
                 else
-                    -- Visible "not learned" marker — a dim red X — so the
-                    -- user can distinguish "not learned" from "no data".
+                    -- Visible "not learned" marker so the user can distinguish
+                    -- "not learned" from "no data". Neutral dim gray rather than
+                    -- saturated red: "not learned" is the normal resting state
+                    -- for most cells, so a red X across the whole grid read as
+                    -- alarming/noisy (issue #7).
                     cell.tex:SetTexture(MISS_TEXTURE)
-                    cell.tex:SetVertexColor(0.8, 0.3, 0.3)
-                    cell.tex:SetAlpha(0.65)
+                    cell.tex:SetVertexColor(0.5, 0.5, 0.5)
+                    cell.tex:SetAlpha(0.35)
                     cell.tex:Show()
                 end
                 cell:Show()
