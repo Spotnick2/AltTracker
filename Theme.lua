@@ -53,6 +53,15 @@ AltTracker.C = {
     ACCENT       = { 1.00, 0.82, 0.00 },        -- WoW gold/yellow
     ACCENT2      = { 0.00, 0.80, 1.00 },        -- cyan (intentional, for iLvl/links only)
 
+    -- Structural / semantic tokens. Centralized so a palette re-skin in this
+    -- file reaches every tab (incl. the Roster plugin) instead of leaving
+    -- hardcoded colors behind. Values match what was previously inlined, so
+    -- adding these is a zero-visual-change dedup (issue #18).
+    BG_BADGE     = { 0.10, 0.10, 0.10, 0.95 },  -- stat badge / readout backdrops
+    TEXT_VALUE   = { 0.95, 0.95, 0.95 },        -- numeric readout values (iLvl, GS)
+    TEXT_MUTED   = { 0.667, 0.667, 0.667 },     -- muted grey label runs (== |cffaaaaaa)
+    POSITIVE     = { 0.45, 1.00, 0.45 },        -- "good" state (cooldown Ready, etc.)
+
     -- Class row tint alpha
     CLASS_TINT_ALPHA = 0.08,
 }
@@ -80,6 +89,12 @@ end
 ------------------------------------------------------------
 -- Accent color (theme-aware)
 ------------------------------------------------------------
+
+-- Build a "|cffRRGGBB" escape from a {r,g,b} palette entry, so inline colored
+-- text runs can reference the palette instead of hardcoding hex (issue #18).
+function AltTracker.HexColor(c)
+    return string.format("|cff%02x%02x%02x", (c[1] or 0) * 255, (c[2] or 0) * 255, (c[3] or 0) * 255)
+end
 
 function AltTracker.GetAccentRGB()
     local theme = AltTrackerConfig and AltTrackerConfig.theme or "dark"

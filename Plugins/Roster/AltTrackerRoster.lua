@@ -10,6 +10,12 @@ local ADDON_ID = "alts" -- keep stable plugin id for compatibility with existing
 local AT_ALTS = {}
 AT_ALTS.isActive = false
 
+-- Muted grey run, sourced from the shared palette so a re-skin follows instead
+-- of leaving hardcoded "|cffaaaaaa" behind (issue #18). Fixed grey, not accent,
+-- so caching the escape once at load is fine. Stored on the module table (not a
+-- new local) because this file's main chunk is already at Lua 5.1's 200-local cap.
+AT_ALTS.MUTED = AltTracker.HexColor(AltTracker.C.TEXT_MUTED)
+
 local panel
 local selectorPanel
 local selectorScroll
@@ -778,7 +784,7 @@ RenderSelector = function()
             row.name:SetPoint("RIGHT", row, "RIGHT", -55, 0)
             row.sub:ClearAllPoints()
             row.sub:Hide()
-            row.name:SetText(g.realm .. " |cffaaaaaa(" .. g.account .. ")|r")
+            row.name:SetText(g.realm .. " " .. AT_ALTS.MUTED .. "(" .. g.account .. ")|r")
             row.name:SetTextColor(unpack(AltTracker.C.TEXT_BRIGHT))
             row.ilvl:Show()
             local gCount = g.count or 0
@@ -1013,7 +1019,7 @@ local function SetCenterText(char)
         centerSummaryText:SetText("Select a character from the left list.")
         centerLastSeenText:SetText("Offline viewer uses last saved AltTracker data.")
         if centerILvlBadgeValue then centerILvlBadgeValue:SetText("-") end
-        if centerGSBadgeValue then centerGSBadgeValue:SetText("-"); centerGSBadgeValue:SetTextColor(0.95, 0.95, 0.95) end
+        if centerGSBadgeValue then centerGSBadgeValue:SetText("-"); centerGSBadgeValue:SetTextColor(unpack(AltTracker.C.TEXT_VALUE)) end
         return
     end
 
@@ -1050,7 +1056,7 @@ local function SetCenterText(char)
             centerGSBadgeValue:SetTextColor(r, g, b)
         else
             centerGSBadgeValue:SetText("-")
-            centerGSBadgeValue:SetTextColor(0.95, 0.95, 0.95)
+            centerGSBadgeValue:SetTextColor(unpack(AltTracker.C.TEXT_VALUE))
         end
     end
 end
@@ -2749,7 +2755,7 @@ local function UpdateProfRows(char)
             row.label:SetText(cd.label)
             if cd.ts <= now then
                 row.value:SetText("Ready")
-                row.value:SetTextColor(0.45, 1.0, 0.45)
+                row.value:SetTextColor(unpack(AltTracker.C.POSITIVE))
             else
                 row.value:SetText("Ready in " .. DurationText(cd.ts - now))
                 row.value:SetTextColor(unpack(AltTracker.C.TEXT_NORM))
@@ -2807,7 +2813,7 @@ local function UpdateStatsHeader(char)
         statsMetaText:SetText("")
         statsGuildText:SetText("")
         statsILvlText:SetText("-")
-        if statsGSText then statsGSText:SetText("-"); statsGSText:SetTextColor(0.95, 0.95, 0.95) end
+        if statsGSText then statsGSText:SetText("-"); statsGSText:SetTextColor(unpack(AltTracker.C.TEXT_VALUE)) end
         return
     end
 
@@ -2833,7 +2839,7 @@ local function UpdateStatsHeader(char)
             statsGSText:SetTextColor(r, g, b)
         else
             statsGSText:SetText("-")
-            statsGSText:SetTextColor(0.95, 0.95, 0.95)
+            statsGSText:SetTextColor(unpack(AltTracker.C.TEXT_VALUE))
         end
     end
 end
@@ -2880,13 +2886,13 @@ local function UpdateFooter()
     -- rather than "1 chars" / "1 total levels" (issue #14).
     local charNoun  = (totalChars == 1) and "char" or "chars"
     local levelNoun = (totalLevel == 1) and "total level" or "total levels"
-    footerLeft:SetText(accentHex .. totalChars .. "|r |cffaaaaaa" .. charNoun .. "  " .. accentHex .. totalLevel .. "|r |cffaaaaaa" .. levelNoun .. "|r")
+    footerLeft:SetText(accentHex .. totalChars .. "|r " .. AT_ALTS.MUTED .. charNoun .. "  " .. accentHex .. totalLevel .. "|r " .. AT_ALTS.MUTED .. levelNoun .. "|r")
     if ilvlCount > 0 then
-        footerMid:SetText(string.format("|cffaaaaaa%.1f|r avg iLvl", ilvlTotal / ilvlCount))
+        footerMid:SetText(string.format(AT_ALTS.MUTED .. "%.1f|r avg iLvl", ilvlTotal / ilvlCount))
     else
         footerMid:SetText("")
     end
-    footerRight:SetText("|cffaaaaaa" .. math.floor(totalGold / 10000) .. GOLD_ICON_SM .. " total gold|r")
+    footerRight:SetText(AT_ALTS.MUTED .. math.floor(totalGold / 10000) .. GOLD_ICON_SM .. " total gold|r")
 end
 
 -- Highlight the active List/Scene toggle button.
@@ -3286,7 +3292,7 @@ local function BuildDetailPanel()
     local badgeILvl = CreateFrame("Frame", nil, centerIdentityPanel, "BackdropTemplate")
     badgeILvl:SetSize(66, 34)
     badgeILvl:SetPoint("TOP", centerRaceText, "BOTTOM", -38, -10)
-    AltTracker.ApplyBackdrop(badgeILvl, 0.10, 0.10, 0.10, 0.95)
+    AltTracker.ApplyBackdrop(badgeILvl, AltTracker.C.BG_BADGE[1], AltTracker.C.BG_BADGE[2], AltTracker.C.BG_BADGE[3], AltTracker.C.BG_BADGE[4])
 
     local badgeILabel = badgeILvl:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     badgeILabel:SetPoint("TOP", badgeILvl, "TOP", 0, -5)
@@ -3295,7 +3301,7 @@ local function BuildDetailPanel()
 
     centerILvlBadgeValue = badgeILvl:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     centerILvlBadgeValue:SetPoint("TOP", badgeILabel, "BOTTOM", 0, -1)
-    centerILvlBadgeValue:SetTextColor(0.95, 0.95, 0.95)
+    centerILvlBadgeValue:SetTextColor(unpack(AltTracker.C.TEXT_VALUE))
     centerILvlBadgeValue:SetText("-")
 
     -- Explain the iLvl badge — the number was shown bare (issue #15).
@@ -3312,7 +3318,7 @@ local function BuildDetailPanel()
     local badgeGS = CreateFrame("Frame", nil, centerIdentityPanel, "BackdropTemplate")
     badgeGS:SetSize(66, 34)
     badgeGS:SetPoint("TOP", centerRaceText, "BOTTOM", 38, -10)
-    AltTracker.ApplyBackdrop(badgeGS, 0.10, 0.10, 0.10, 0.95)
+    AltTracker.ApplyBackdrop(badgeGS, AltTracker.C.BG_BADGE[1], AltTracker.C.BG_BADGE[2], AltTracker.C.BG_BADGE[3], AltTracker.C.BG_BADGE[4])
 
     local badgeGLabel = badgeGS:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     badgeGLabel:SetPoint("TOP", badgeGS, "TOP", 0, -5)
@@ -3321,7 +3327,7 @@ local function BuildDetailPanel()
 
     centerGSBadgeValue = badgeGS:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     centerGSBadgeValue:SetPoint("TOP", badgeGLabel, "BOTTOM", 0, -1)
-    centerGSBadgeValue:SetTextColor(0.95, 0.95, 0.95)
+    centerGSBadgeValue:SetTextColor(unpack(AltTracker.C.TEXT_VALUE))
     centerGSBadgeValue:SetText("-")
 
     -- Explain the GearScore badge — the number was shown bare (issue #15).
@@ -3390,7 +3396,7 @@ local function BuildDetailPanel()
 
     statsILvlText = statsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     statsILvlText:SetPoint("TOP", ilvlLabel, "BOTTOM", 0, -2)
-    statsILvlText:SetTextColor(0.95, 0.95, 0.95)
+    statsILvlText:SetTextColor(unpack(AltTracker.C.TEXT_VALUE))
     statsILvlText:SetText("-")
 
     local gsLabel = statsPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -3400,7 +3406,7 @@ local function BuildDetailPanel()
 
     statsGSText = statsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     statsGSText:SetPoint("TOP", gsLabel, "BOTTOM", 0, -1)
-    statsGSText:SetTextColor(0.95, 0.95, 0.95)
+    statsGSText:SetTextColor(unpack(AltTracker.C.TEXT_VALUE))
     statsGSText:SetText("-")
 
     BuildTabs()
