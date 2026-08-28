@@ -243,16 +243,37 @@ end
 -- Returns the primary BiS item name for a slot (the first entry when a table
 -- of alternatives is listed), used to render the side-by-side comparison
 -- tooltip in the Gear Progression grid.
-local function GetBisItemName(class, spec, slotKey)
+-- Replacement suggested in a gear tooltip for a slot the character has not filled
+-- with a BiS item.
+--
+-- For the interchangeable pairs this must consider what is worn in the PARTNER
+-- slot. Scoring already treats ring1/ring2 as one set, so recommending the entry
+-- nominally assigned to this physical socket can suggest an item the character is
+-- already wearing in the other one — and equipping it would not raise the score,
+-- because CountBisForPair consumes each entry only once. Recommend an entry that
+-- is still missing instead.
+local function GetBisItemName(class, spec, slotKey, char)
     if not class or not spec or not slotKey then return nil end
-    local bisData = AltTracker.BisData
-    if not bisData then return nil end
-    local classData = bisData[class]; if not classData then return nil end
-    local specData = classData[spec]; if not specData then return nil end
-    local tierData = specData[CurrentTier()]; if not tierData then return nil end
-    local items = tierData[slotKey]
-    if type(items) == "string" then return items
-    elseif type(items) == "table" then return items[1] end
+    local tierData = BisTierData(class, spec)
+    if not tierData then return nil end
+
+    local partner = SLOT_PARTNER[slotKey]
+    if not partner or not char then
+        local items = BisNamesForSlot(tierData, slotKey)
+        return items and items[1] or nil
+    end
+
+    -- This slot's own entries first so the usual case keeps its usual answer, then
+    -- the partner's; skip anything already worn in the partner slot.
+    local wornInPartner = char["gearname_"..partner] or ""
+    for _, key in ipairs({ slotKey, partner }) do
+        local names = BisNamesForSlot(tierData, key)
+        if names then
+            for _, name in ipairs(names) do
+                if name ~= wornInPartner then return name end
+            end
+        end
+    end
     return nil
 end
 
@@ -356,8 +377,9 @@ end
 -- functions stay local so the row renderer remains a closed unit, but the BiS
 -- suite needs to exercise slot pairing directly.
 AltTracker._test = AltTracker._test or {}
-AltTracker._test.CountBisItems = CountBisItems
-AltTracker._test.IsItemBis     = IsItemBis
+AltTracker._test.CountBisItems  = CountBisItems
+AltTracker._test.IsItemBis      = IsItemBis
+AltTracker._test.GetBisItemName = GetBisItemName
 
 ------------------------------------------------------------
 -- BiS count gradient: grey (0) → white → green → orange
@@ -920,7 +942,7 @@ function AltTracker.RenderRow(row, char, index, columns)
 
             -- BiS check
             local bisTier = IsItemBis(char.class, char.spec, slotKey, itemName)
-            local bisName = bisTier and nil or GetBisItemName(char.class, char.spec, slotKey)
+            local bisName = bisTier and nil or GetBisItemName(char.class, char.spec, slotKey, char)
             if row.gearTips[i] then
                 row.gearTips[i].slotIlvl         = v
                 row.gearTips[i].slotQuality       = q

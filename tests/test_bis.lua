@@ -191,6 +191,8 @@ end
 
 AltTrackerConfig.bisTier = "T6"
 local class, spec, tierData, r1, r2, t1, t2 = FindPairedFixture("T6")
+-- Declared here so both the pairing block and the tooltip block below can use it.
+local CharWith
 check(class ~= nil, "no class/spec with two distinct rings and trinkets at T6")
 
 if class then
@@ -206,7 +208,7 @@ if class then
 
     -- Build a character wearing the full BiS set, then the same set with the
     -- pairs swapped. Both must score identically.
-    local function CharWith(swap)
+    CharWith = function(swap)
         local c = { class = class, spec = spec, gear_offhand = 1 }
         for slot, v in pairs(tierData) do
             local name = type(v) == "table" and v[1] or v
@@ -230,6 +232,50 @@ if class then
     dup.gearname_ring2 = r1
     local dupCount = countBis(dup)
     eq(dupCount, straightCount - 1, "duplicate BiS ring must score once, not twice")
+end
+
+------------------------------------------------------------
+-- Replacement tooltips must respect the partner slot
+--
+-- Scoring treats ring1/ring2 as one set, so recommending the entry nominally
+-- assigned to a socket can name an item already worn in the other one — and
+-- equipping it would not raise the score, since each entry is consumed once.
+------------------------------------------------------------
+
+local getBisName = assert(AltTracker._test and AltTracker._test.GetBisItemName,
+                          "GetBisItemName test seam missing")
+
+if class then
+    -- Baseline: with nothing worn, each socket still suggests its own entry.
+    local bare = { class = class, spec = spec }
+    eq(getBisName(class, spec, "ring1", bare), r1, "empty ring1 should suggest its own entry")
+    eq(getBisName(class, spec, "ring2", bare), r2, "empty ring2 should suggest its own entry")
+
+    -- The reported case: ring2's entry is worn in ring1, ring2 holds a non-BiS ring.
+    -- ring2 must NOT be told to equip something already on the character.
+    local crossed = { class = class, spec = spec,
+                      gearname_ring1 = r2, gearname_ring2 = "Definitely Not A Real Ring" }
+    local suggestion = getBisName(class, spec, "ring2", crossed)
+    check(suggestion ~= r2, "ring2 must not suggest the ring already worn in ring1")
+    eq(suggestion, r1, "ring2 should suggest the remaining unworn entry")
+
+    -- Same for trinkets.
+    local crossedT = { class = class, spec = spec,
+                       gearname_trinket1 = t2, gearname_trinket2 = "Not A Real Trinket" }
+    eq(getBisName(class, spec, "trinket2", crossedT), t1,
+       "trinket2 should suggest the remaining unworn entry")
+
+    -- Acting on the suggestion must actually raise the score.
+    local before = countBis(CharWith(false))
+    local partial = CharWith(false)
+    partial.gearname_ring1 = r2
+    partial.gearname_ring2 = "Definitely Not A Real Ring"
+    local partialCount = countBis(partial)
+    local advised = getBisName(class, spec, "ring2", partial)
+    partial.gearname_ring2 = advised
+    local afterCount = countBis(partial)
+    eq(partialCount, before - 1, "one missing ring should cost exactly one point")
+    eq(afterCount, before, "equipping the advised ring should restore the point")
 end
 
 if failures > 0 then
