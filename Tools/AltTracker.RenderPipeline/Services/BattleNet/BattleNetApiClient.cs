@@ -122,7 +122,7 @@ public sealed class BattleNetApiClient
 
         if (response.StatusCode == HttpStatusCode.NotFound)
         {
-            _logger.Verbose($"[BattleNet] No armory entry for {characterName}-{realmSlug} (404).");
+            _logger.Verbose($"[BattleNet] No armory entry for {characterName}-{realmSlug} (404) - the character has never logged out since renders were enabled, or was renamed or deleted.");
             return null;
         }
 
