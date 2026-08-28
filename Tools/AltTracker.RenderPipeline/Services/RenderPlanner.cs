@@ -1,4 +1,4 @@
-using AltTracker.RenderPipeline.Infrastructure;
+﻿using AltTracker.RenderPipeline.Infrastructure;
 using AltTracker.RenderPipeline.Models;
 
 namespace AltTracker.RenderPipeline.Services;
@@ -10,7 +10,8 @@ public sealed class RenderPlanner
         IReadOnlyDictionary<string, ManifestEntry> manifest,
         AppConfig config,
         CliOptions options,
-        RunLogger logger)
+        RunLogger logger,
+        IReadOnlySet<string>? armoryUpdatedKeys = null)
     {
         var jobs = new List<RenderJob>();
         var skipped = 0;
@@ -34,6 +35,13 @@ public sealed class RenderPlanner
 
             if (!filterMatch) continue;
             if (options.ForceAll) reasons.Add("force-all");
+            // A changed armory render is the ONLY signal for a character whose local SavedVariables
+            // are untouched (the player logged out in new gear but the addon data looks identical).
+            // Without this the character is skipped here and the render adapter never sees it.
+            if (armoryUpdatedKeys is not null && armoryUpdatedKeys.Contains(manifestKey))
+            {
+                reasons.Add("armory-render-updated");
+            }
             if (!File.Exists(finalPath)) reasons.Add("missing-output-image");
             if (!manifest.TryGetValue(manifestKey, out var entry))
             {
