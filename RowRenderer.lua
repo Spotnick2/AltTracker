@@ -263,18 +263,40 @@ local function GetBisItemName(class, spec, slotKey, char)
         return items and items[1] or nil
     end
 
-    -- This slot's own entries first so the usual case keeps its usual answer, then
-    -- the partner's; skip anything already worn in the partner slot.
-    local wornInPartner = char["gearname_"..partner] or ""
+    -- Combined ordered pool: this slot's own entries first so the ordinary case keeps
+    -- its usual answer, then the partner's.
+    local pool = {}
     for _, key in ipairs({ slotKey, partner }) do
         local names = BisNamesForSlot(tierData, key)
         if names then
-            for _, name in ipairs(names) do
-                if name ~= wornInPartner then return name end
+            for _, name in ipairs(names) do pool[#pool + 1] = name end
+        end
+    end
+
+    -- Consume exactly ONE copy of whatever is worn in the partner slot, mirroring
+    -- CountBisForPair. Several shipped lists intentionally name the same non-unique
+    -- item for both slots (Ring of Ancient Knowledge fills both ring slots for a
+    -- number of specs), and there a SECOND copy is genuinely the right advice -
+    -- dropping every match would recommend nothing while scoring still awards the
+    -- point for equipping one.
+    -- Both sockets are consumed, one occurrence each. The partner is the case that
+    -- matters in practice; this slot's own item is consumed too so the function is
+    -- correct standalone rather than relying on the caller only asking about slots
+    -- that already failed the BiS check.
+    local function ConsumeOne(worn)
+        if not worn or worn == "" then return end
+        for i, name in ipairs(pool) do
+            if name == worn then
+                table.remove(pool, i)
+                return
             end
         end
     end
-    return nil
+
+    ConsumeOne(char["gearname_"..partner])
+    ConsumeOne(char["gearname_"..slotKey])
+
+    return pool[1]
 end
 
 ------------------------------------------------------------

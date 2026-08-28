@@ -278,6 +278,51 @@ if class then
     eq(afterCount, before, "equipping the advised ring should restore the point")
 end
 
+------------------------------------------------------------
+-- Duplicate non-unique pairs
+--
+-- Several lists name the SAME non-unique item for both paired slots (Ring of
+-- Ancient Knowledge fills both ring slots for a number of specs). Wearing one
+-- copy must still recommend a second, because scoring awards the second point -
+-- consuming one occurrence, not every match.
+------------------------------------------------------------
+
+local function FindDuplicatePair(tier)
+    for cls, specs in pairs(AltTracker.BisData) do
+        for sp, tiers in pairs(specs) do
+            local t = tiers[tier]
+            local function one(slot)
+                local v = t and t[slot]
+                if type(v) == "string" then return v end
+                if type(v) == "table" then return v[1] end
+                return nil
+            end
+            local a, b = one("ring1"), one("ring2")
+            if a and b and a == b then return cls, sp, a end
+        end
+    end
+end
+
+local dupClass, dupSpec, dupRing = FindDuplicatePair("T6")
+check(dupClass ~= nil, "expected at least one spec naming the same ring for both slots at T6")
+
+if dupClass then
+    -- One copy worn, the other slot empty: a second copy is the correct advice.
+    local half = { class = dupClass, spec = dupSpec, gearname_ring1 = dupRing }
+    eq(getBisName(dupClass, dupSpec, "ring2", half), dupRing,
+       "a duplicate non-unique pair should still suggest the second copy")
+
+    -- And equipping it scores the second point.
+    local scoreOne = countBis(half)
+    half.gearname_ring2 = dupRing
+    local scoreTwo = countBis(half)
+    eq(scoreTwo, scoreOne + 1, "equipping the second copy should score the second point")
+
+    -- Both already worn: nothing left to suggest for that pair.
+    check(getBisName(dupClass, dupSpec, "ring2", half) == nil,
+          "with both copies worn the pair is exhausted")
+end
+
 if failures > 0 then
     print("bis tests FAILED: " .. failures .. " of " .. testsRun)
     os.exit(1)
