@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using AltTracker.RenderPipeline.Infrastructure;
 using AltTracker.RenderPipeline.Models;
 using AltTracker.RenderPipeline.Services.HeroShot;
@@ -121,10 +123,15 @@ public sealed class ArmoryReferenceResolver : IDisposable
         var cached = await _cache.FetchAsync(cacheId, media.MainRawUrl).ConfigureAwait(false);
         if (cached is null) return null;
 
+        // The preprocessing settings are part of the prepared file's identity. Keying only on the
+        // render would mean a change to background/padding/threshold/target size never took effect:
+        // an unchanged (304) download would keep serving the old prepared PNG forever, and because
+        // its fingerprint feeds the render signature, nothing downstream would notice either.
         var preparedPath = Path.Combine(
-            Path.GetDirectoryName(_cache.RenderPathFor(cacheId))!, $"{cacheId}-reference.png");
+            Path.GetDirectoryName(_cache.RenderPathFor(cacheId))!,
+            $"{cacheId}-reference-{PreprocessingTag()}.png");
 
-        // Re-prepare when the render changed or the prepared file is missing.
+        // Re-prepare when the render changed or this settings variant has not been built yet.
         if (cached.Changed || !File.Exists(preparedPath))
         {
             var prepared = ReferenceImagePreprocessor.TryPrepare(
@@ -144,8 +151,19 @@ public sealed class ArmoryReferenceResolver : IDisposable
             preparedPath, cached.LocalPath, cached.ContentHash, cached.Changed, media.MainRawUrl);
     }
 
+    /// <summary>Short hash of every setting that affects the prepared reference image.</summary>
+    private string PreprocessingTag()
+    {
+        var b = _config.BattleNet;
+        var canonical = string.Join('|',
+            b.ReferenceBackground, b.PaddingFraction.ToString("R"), b.AlphaThreshold,
+            _config.HeroShot.Width, _config.HeroShot.Height);
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
+        return Convert.ToHexString(hash)[..8].ToLowerInvariant();
+    }
+
     /// <summary>
-    /// Preflight for --refresh-blizzard: returns the manifest keys whose armory render differs from
+    /// Preflight for --refresh-armory: returns the manifest keys whose armory render differs from
     /// what was last rendered. Needed because RenderPlanner drops unchanged characters before the
     /// render adapter runs, so a remote-only change could otherwise never create a job.
     /// </summary>
@@ -159,6 +177,16 @@ public sealed class ArmoryReferenceResolver : IDisposable
         {
             var manifestKey = PathTools.BuildManifestKey(character);
             var baseName = PathTools.BuildOutputBaseName(character);
+
+            // Mirror the adapter, which skips armory resolution when an explicit override exists.
+            // Without this the stored fingerprint belongs to the override image and never matches
+            // the armory one, so the character would be queued on every single refresh and churn
+            // through conversion and a manifest rewrite each time.
+            if (_config.HeroShot.CharacterReferenceImages.ContainsKey(manifestKey))
+            {
+                _logger.Verbose($"[BattleNet] {manifestKey} uses an explicit reference override; not checked.");
+                continue;
+            }
 
             var reference = TryResolve(character, manifestKey, baseName);
             if (reference is null) continue;

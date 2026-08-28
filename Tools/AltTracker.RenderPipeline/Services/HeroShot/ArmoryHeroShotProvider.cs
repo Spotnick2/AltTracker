@@ -1,4 +1,5 @@
 using AltTracker.RenderPipeline.Infrastructure;
+using AltTracker.RenderPipeline.Services.BattleNet;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
@@ -41,6 +42,18 @@ public sealed class ArmoryHeroShotProvider : IHeroShotRenderProvider
         try
         {
             using var source = Image.Load<Rgba32>(request.ArmoryRenderBytes);
+
+            // Trim the mostly-empty canvas FIRST. These bytes are the raw 1600x1200 render in which
+            // the subject occupies under 10% of the pixels; fitting it untrimmed would scale the
+            // character to roughly a fifth of the frame height and publish a tiny floating figure.
+            if (!ReferenceImagePreprocessor.TryTrimToAlpha(source))
+            {
+                return Task.FromResult(new HeroShotResponse
+                {
+                    Success = false,
+                    Error = "Armory render contained no visible pixels."
+                });
+            }
 
             // Fit the whole character into the target frame. The publish step crops with "cover",
             // which would cut off head and feet - emitting the final size here makes that a no-op.

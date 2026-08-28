@@ -99,6 +99,24 @@ public static class ReferenceImagePreprocessor
     }
 
     /// <summary>
+    /// Crops <paramref name="image"/> in place to its visible subject. Returns false when nothing
+    /// clears the alpha threshold.
+    ///
+    /// Anything consuming a raw armory render must do this first: the subject occupies under 10% of
+    /// the 1600x1200 canvas, so fitting the untrimmed canvas into a portrait frame scales the
+    /// character down to a fraction of it.
+    /// </summary>
+    public static bool TryTrimToAlpha(Image<Rgba32> image, byte alphaThreshold = 8)
+    {
+        var bounds = FindAlphaBounds(image, alphaThreshold);
+        if (bounds is null) return false;
+
+        var (left, top, right, bottom) = bounds.Value;
+        image.Mutate(x => x.Crop(new Rectangle(left, top, right - left + 1, bottom - top + 1)));
+        return true;
+    }
+
+    /// <summary>
     /// Bounding box of pixels whose ALPHA exceeds the threshold.
     ///
     /// Deliberately alpha-only: fully transparent pixels in these renders can still carry nonzero

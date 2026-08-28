@@ -9,6 +9,27 @@ public sealed class HeroShotRenderAdapter : IRenderAdapter
 {
     private readonly ArmoryReferenceResolver? _armory;
 
+    // Render state is staged here and only written to disk once Program has converted, copied and
+    // recorded the image. Saving it at generation time would mark a render "done" that never
+    // actually got published: a later conversion/copy/manifest failure would leave the stored
+    // reference fingerprint matching the live one, so --refresh-armory would see no difference and
+    // the unchanged gear hash would give the planner no other reason to retry - silently dropping
+    // the update instead of re-running it.
+    private readonly Dictionary<string, (string ManifestKey, HeroShotRenderState State)> _pendingStates =
+        new(StringComparer.OrdinalIgnoreCase);
+    private HeroShotStateStore? _stateStore;
+
+    /// <summary>
+    /// Persists the render state for a job whose image was successfully published. No-op for jobs
+    /// that were skipped or that failed.
+    /// </summary>
+    public void CommitPendingState(string jobKey)
+    {
+        if (_stateStore is null) return;
+        if (!_pendingStates.Remove(jobKey, out var pending)) return;
+        _stateStore.Save(pending.ManifestKey, pending.State);
+    }
+
     /// <param name="armory">
     /// Supplies Battle.net armory renders as the highest-priority reference source. Shared with the
     /// --refresh-armory preflight so each character is fetched at most once per run. Null disables
@@ -27,6 +48,8 @@ public sealed class HeroShotRenderAdapter : IRenderAdapter
     {
         var cfg = config.HeroShot;
         var stateStore = new HeroShotStateStore(config.TempPath);
+        _stateStore = stateStore;
+        _pendingStates.Clear();
         var validator = new HeroShotQualityValidator();
 
         // Providers are cached by name: the default plus any per-character overrides. All names are
@@ -73,7 +96,8 @@ public sealed class HeroShotRenderAdapter : IRenderAdapter
 
             try
             {
-                ProcessJob(job, cfg, config, options, providerCache, stateStore, validator, _armory, sources, errors, logger);
+                ProcessJob(job, cfg, config, options, providerCache, stateStore, validator, _armory,
+                           sources, errors, _pendingStates, logger);
             }
             catch (Exception ex)
             {
@@ -96,6 +120,7 @@ public sealed class HeroShotRenderAdapter : IRenderAdapter
         ArmoryReferenceResolver? armory,
         Dictionary<string, string> sources,
         Dictionary<string, string> errors,
+        Dictionary<string, (string ManifestKey, HeroShotRenderState State)> pendingStates,
         RunLogger logger)
     {
         var c = job.Character;
@@ -214,7 +239,7 @@ public sealed class HeroShotRenderAdapter : IRenderAdapter
         File.WriteAllBytes(stagingPath, response.ImageBytes);
         logger.Info($"[HeroShot] Staged: {stagingPath} ({response.ImageBytes.Length} bytes)");
 
-        stateStore.Save(job.ManifestKey, new HeroShotRenderState
+        pendingStates[job.JobKey] = (job.ManifestKey, new HeroShotRenderState
         {
             ManifestKey = job.ManifestKey,
             RenderSignature = signature,

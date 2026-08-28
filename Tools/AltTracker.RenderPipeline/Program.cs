@@ -59,13 +59,18 @@ try
     logger.Info($"Render spec: {config.RenderSpec.Width}x{config.RenderSpec.Height}, transparentPreferred={config.RenderSpec.PreferTransparentBackground}, framing={config.RenderSpec.FramingPreset}");
 
     // HeroShot (codex imagegen) is the only render backend.
-    IRenderAdapter adapter = new HeroShotRenderAdapter(armory);
+    var heroShotAdapter = new HeroShotRenderAdapter(armory);
+    IRenderAdapter adapter = heroShotAdapter;
     logger.Info($"Render backend: {config.RenderBackend}");
     var renderResult = adapter.Execute(plan.Jobs, config, options, logger);
 
     var converter = new ImageConverter();
     var successful = 0;
     var failed = 0;
+    // Jobs whose image reached disk. Their render state is only persisted once the manifest write
+    // has also succeeded, so a failure anywhere in publishing leaves the job looking un-rendered
+    // and it is retried next run instead of being silently considered done.
+    var publishedJobKeys = new List<string>();
 
     foreach (var job in plan.Jobs)
     {
@@ -134,6 +139,7 @@ try
         {
             successful++;
             existingManifest[job.ManifestKey] = ManifestEntry.FromJob(job, config);
+            publishedJobKeys.Add(job.JobKey);
         }
     }
 
@@ -146,6 +152,12 @@ try
             return (int)PipelineExitCode.PublishError;
         }
         logger.Info($"Manifest written: {config.ManifestOutputPath}");
+
+        // Publish succeeded end to end, so it is now safe to record these renders as done.
+        foreach (var jobKey in publishedJobKeys)
+        {
+            heroShotAdapter.CommitPendingState(jobKey);
+        }
     }
     else
     {
