@@ -13,6 +13,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The URL derivation and slug normalisation helpers are internal on purpose: they are
+         implementation detail of BattleNetApiClient, not API. The test project still needs them. -->
+    <InternalsVisibleTo Include="AltTracker.RenderPipeline.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Update="appsettings.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
