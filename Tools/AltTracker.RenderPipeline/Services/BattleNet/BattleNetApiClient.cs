@@ -18,7 +18,7 @@ public sealed class BattleNetApiClient
     private static readonly Regex AvatarFileName =
         new(@"^(?<renderId>\d+)-avatar\.jpg$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    private const string RenderHostSuffix = "render.worldofwarcraft.com";
+    private const string RenderHostSuffix = ".worldofwarcraft.com";
 
     private readonly AppConfig.BattleNetConfig _config;
     private readonly BattleNetTokenProvider _tokens;
@@ -190,7 +190,7 @@ public sealed class BattleNetApiClient
 
         if (!Uri.TryCreate(avatarUrl, UriKind.Absolute, out var uri)) return false;
         if (uri.Scheme != Uri.UriSchemeHttps) return false;
-        if (!uri.Host.EndsWith(RenderHostSuffix, StringComparison.OrdinalIgnoreCase)) return false;
+        if (!IsRenderCdnHost(uri.Host)) return false;
 
         var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (segments.Length < 2) return false;
@@ -204,6 +204,24 @@ public sealed class BattleNetApiClient
 
         mainRawUrl = $"{uri.Scheme}://{uri.Host}/{string.Join("/", segments)}";
         return true;
+    }
+
+    /// <summary>
+    /// Whether a host is the character-render CDN. Blizzard serves renders both from
+    /// render.worldofwarcraft.com and from region-prefixed hosts such as
+    /// render-us.worldofwarcraft.com (the form used in Blizzard's own documentation), so the first
+    /// label is matched rather than the whole host - while still refusing any other subdomain.
+    /// </summary>
+    private static bool IsRenderCdnHost(string host)
+    {
+        if (!host.EndsWith(RenderHostSuffix, StringComparison.OrdinalIgnoreCase)) return false;
+
+        var dot = host.IndexOf('.');
+        if (dot <= 0) return false;
+
+        var firstLabel = host[..dot];
+        return firstLabel.Equals("render", StringComparison.OrdinalIgnoreCase)
+            || firstLabel.StartsWith("render-", StringComparison.OrdinalIgnoreCase);
     }
 
     internal static string NormalizeSlug(string realmName)

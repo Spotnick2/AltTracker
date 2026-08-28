@@ -63,6 +63,26 @@ newer Lua is first on `PATH`).
   promoting internals to real globals.
 - **Add a test** as `tests/test_<area>.lua`, following `tests/test_comm.lua`; `run.ps1`
   picks it up automatically. See `tests/README.md` for details.
+- **Python tests** for the `Tools/` scripts live alongside them as `tests/test_*.py` and are
+  also picked up by `run.ps1` (skipped with a notice when `python` is not on `PATH`). Same
+  plain-assert style, no pytest.
+
+### RenderPipeline (C#)
+
+The .NET render pipeline has its own xUnit suite in `Tools/AltTracker.RenderPipeline.Tests`:
+
+```powershell
+dotnet test Tools/AltTracker.RenderPipeline.Tests
+```
+
+It is **not** run by `tests/run.ps1` — that harness is Lua/Python only. Run it separately when
+touching anything under `Tools/AltTracker.RenderPipeline`.
+
+Coverage is deliberately aimed at the pure logic where staleness bugs hide rather than at the
+I/O paths: URL derivation and the render-CDN host check, realm-slug fallback, render-signature
+inputs, alpha-bbox trimming, cache identity, planner reasons, and the quality gate. Internals
+are reached through an `InternalsVisibleTo` on the main project — the same idea as the Lua
+`AltTracker._test` seam.
 
 ## Deploying for in-game testing
 
