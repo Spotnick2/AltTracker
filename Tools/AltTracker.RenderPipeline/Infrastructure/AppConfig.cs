@@ -117,6 +117,12 @@ public sealed class AppConfig
         public int AlphaThreshold { get; set; } = 8;
         /// <summary>Realm name -> slug overrides, for realms the index does not resolve.</summary>
         public Dictionary<string, string> RealmSlugOverrides { get; set; } = new();
+        /// <summary>
+        /// Blizzard does not generate character renders below level 10, so characters under this
+        /// level are skipped without a lookup. Configurable rather than hardcoded because it is
+        /// Blizzard's policy, not ours, and could change.
+        /// </summary>
+        public int MinimumCharacterLevel { get; set; } = 10;
     }
 
     public static AppConfig Load(CliOptions options, RunLogger logger)

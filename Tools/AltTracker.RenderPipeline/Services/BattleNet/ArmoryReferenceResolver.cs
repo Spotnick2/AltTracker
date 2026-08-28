@@ -107,11 +107,31 @@ public sealed class ArmoryReferenceResolver : IDisposable
         return result;
     }
 
+    /// <summary>
+    /// Whether Battle.net will have no render for this character purely because of its level.
+    ///
+    /// A level of 0 means the addon has not recorded one, in which case we try anyway rather than
+    /// skip on missing data.
+    /// </summary>
+    public static bool IsBelowRenderLevel(CharacterRecord character, int minimumLevel)
+        => character.Level > 0 && character.Level < minimumLevel;
+
     private async Task<ArmoryReference?> ResolveCore(
         CharacterRecord character, string manifestKey, string outputBaseName)
     {
         if (string.IsNullOrWhiteSpace(character.Realm) || string.IsNullOrWhiteSpace(character.Name))
         {
+            return null;
+        }
+
+        // Skip the lookup entirely rather than spend a request to be told 404. Bank mules and
+        // fresh alts are exactly the characters that sit below this line.
+        var minimumLevel = _config.BattleNet.MinimumCharacterLevel;
+        if (IsBelowRenderLevel(character, minimumLevel))
+        {
+            _logger.Verbose(
+                $"[BattleNet] {manifestKey} is level {character.Level}; Battle.net does not render "
+              + $"characters below level {minimumLevel}. Not looked up.");
             return null;
         }
 

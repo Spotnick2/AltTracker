@@ -34,8 +34,10 @@ public sealed class ArmoryHeroShotProvider : IHeroShotRenderProvider
             {
                 Success = false,
                 Error = "No armory render available for this character. Battle.net has no full-body "
-                      + "render for it (not on a classicann realm, never logged out, or renamed). "
-                      + "Set this character back to the 'codex' provider, or check --refresh-armory output."
+                      + "render for it - most often because it is below level 10, which Blizzard "
+                      + "does not render at all; otherwise it has never logged out since renders "
+                      + "were enabled, or was renamed. Set this character back to the 'codex' "
+                      + "provider, or check --refresh-armory output."
             });
         }
 
