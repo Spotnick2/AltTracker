@@ -158,7 +158,7 @@ def parse_scene_manifest(path):
         h = FIELD_RE("height").search(body)
         if not (img and w and h):
             continue
-        base = re.split(r"\+", img.group("v"))[-1]
+        base = re.split(r"\\+", img.group("v"))[-1]  # same backslash split as parse_render_manifest
         out[key] = (base, w.group("v"), h.group("v"))
     return out
 

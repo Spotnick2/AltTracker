@@ -1,9 +1,12 @@
 <#
-    run.ps1 — Run all AltTracker Lua unit tests.
+    run.ps1 — Run all AltTracker unit tests.
 
-    Tests are plain Lua 5.1 scripts (no dependencies) that load addon files
+    Lua tests are plain Lua 5.1 scripts (no dependencies) that load addon files
     against tests/wow_stubs.lua. WoW uses Lua 5.1, so the tests do too — not
     the newer Lua that may be first on PATH.
+
+    Python tests (test_*.py) cover the Tools/ scripts and run on whatever
+    python is on PATH; they are skipped if python is unavailable.
 
     Usage:
         pwsh tests/run.ps1
@@ -33,6 +36,18 @@ try {
         if ($LASTEXITCODE -ne 0) { $failed++ }
         Write-Host ""
     }
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if ($py) {
+        Get-ChildItem (Join-Path $PSScriptRoot "test_*.py") | Sort-Object Name | ForEach-Object {
+            Write-Host "── $($_.Name) ──────────────────────────────" -ForegroundColor Cyan
+            & $py.Source $_.FullName
+            if ($LASTEXITCODE -ne 0) { $failed++ }
+            Write-Host ""
+        }
+    } else {
+        Write-Host "python not found on PATH — skipping Python tests" -ForegroundColor Yellow
+    }
+
     if ($failed -gt 0) {
         Write-Host "$failed test file(s) FAILED" -ForegroundColor Red
         exit 1
