@@ -5,6 +5,4 @@
 # Packaged share zips (built by staging the deployable addon folders)
 dist/
 
-# .NET test artifacts
-Tools/**/bin/
-Tools/**/obj/
+__pycache__/
