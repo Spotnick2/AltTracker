@@ -1,6 +1,8 @@
-using AltTracker.RenderPipeline.Infrastructure;
+﻿using AltTracker.RenderPipeline.Infrastructure;
 using AltTracker.RenderPipeline.Models;
 using AltTracker.RenderPipeline.Services;
+using AltTracker.RenderPipeline.Services.BattleNet;
+using AltTracker.RenderPipeline.Services.HeroShot;
 
 var options = CliOptions.Parse(args);
 var logger = new RunLogger(options.Verbose);
@@ -26,24 +28,60 @@ try
         manifestStore.Read(config.ManifestOutputPath, logger),
         StringComparer.OrdinalIgnoreCase);
 
+    // Battle.net armory renders are the preferred reference source. Created once and shared with
+    // the render adapter so each character is fetched at most once per run.
+    using var armory = ArmoryReferenceResolver.Create(config, logger);
+    if (!armory.Available)
+    {
+        logger.Info($"[BattleNet] Armory references disabled: {armory.UnavailableReason}");
+    }
+
+    // Remote checks are opt-in. An ordinary run stays entirely offline; --refresh-armory asks
+    // Battle.net whether any render changed and lets those characters become jobs.
+    // A plain --dry-run stays entirely offline. Combining it with --refresh-armory is a deliberate
+    // double opt-in that previews which characters would be re-rendered, without generating
+    // anything: the render adapter still short-circuits on DryRun before any provider call.
+    IReadOnlySet<string>? armoryUpdatedKeys = null;
+    if (options.RefreshArmory && armory.Available)
+    {
+        logger.Info(options.DryRun
+            ? "[BattleNet] Checking the armory for updated renders (read-only preview; nothing will be generated)..."
+            : "[BattleNet] Checking the armory for updated character renders...");
+        var preflightCharacters = characters.Where(c => RenderPlanner.MatchesFilter(c, options)).ToList();
+        armoryUpdatedKeys = armory.FindChangedCharacters(preflightCharacters, new HeroShotStateStore(config.TempPath));
+        logger.Info($"[BattleNet] Characters with an updated render: {armoryUpdatedKeys.Count}");
+    }
+
     var planner = new RenderPlanner();
-    var plan = planner.BuildPlan(characters, existingManifest, config, options, logger);
+    var plan = planner.BuildPlan(characters, existingManifest, config, options, logger, armoryUpdatedKeys);
 
     logger.Info($"Render candidates selected: {plan.Jobs.Count}");
     logger.Info($"Skipped unchanged characters: {plan.SkippedCount}");
     logger.Info($"Render spec: {config.RenderSpec.Width}x{config.RenderSpec.Height}, transparentPreferred={config.RenderSpec.PreferTransparentBackground}, framing={config.RenderSpec.FramingPreset}");
 
     // HeroShot (codex imagegen) is the only render backend.
-    IRenderAdapter adapter = new HeroShotRenderAdapter();
+    var heroShotAdapter = new HeroShotRenderAdapter(armory);
+    IRenderAdapter adapter = heroShotAdapter;
     logger.Info($"Render backend: {config.RenderBackend}");
     var renderResult = adapter.Execute(plan.Jobs, config, options, logger);
 
     var converter = new ImageConverter();
     var successful = 0;
     var failed = 0;
+    // Jobs whose image reached disk. Their render state is only persisted once the manifest write
+    // has also succeeded, so a failure anywhere in publishing leaves the job looking un-rendered
+    // and it is retried next run instead of being silently considered done.
+    var publishedJobKeys = new List<string>();
 
     foreach (var job in plan.Jobs)
     {
+        // The adapter records an error when generation or quality validation failed. It may still
+        // hand back the *previous* staging image so the portrait does not blank out (see
+        // HeroShotRenderAdapter "Keeping prior staging image"). That retained image is stale, so it
+        // must never be published under the new gear hash.
+        renderResult.ErrorByJobKey.TryGetValue(job.JobKey, out var renderError);
+        var hasRenderError = !string.IsNullOrWhiteSpace(renderError);
+
         if (!renderResult.SourceByJobKey.TryGetValue(job.JobKey, out var sourcePath))
         {
             if (options.DryRun)
@@ -52,7 +90,7 @@ try
             }
             else
             {
-                if (renderResult.ErrorByJobKey.TryGetValue(job.JobKey, out var renderError) && !string.IsNullOrWhiteSpace(renderError))
+                if (hasRenderError)
                 {
                     logger.Warn($"Render missing for {job.JobKey}: {renderError}");
                 }
@@ -91,8 +129,19 @@ try
             }
         }
 
-        successful++;
-        existingManifest[job.ManifestKey] = ManifestEntry.FromJob(job, config);
+        if (hasRenderError)
+        {
+            // Stale image retained: refresh the .tga so the addon keeps a valid texture, but leave
+            // the manifest entry untouched so the planner still sees the change and retries.
+            logger.Warn($"Render failed for {job.JobKey}: {renderError}. Kept the previous image; manifest entry left unchanged so the next run retries.");
+            failed++;
+        }
+        else
+        {
+            successful++;
+            existingManifest[job.ManifestKey] = ManifestEntry.FromJob(job, config);
+            publishedJobKeys.Add(job.JobKey);
+        }
     }
 
     if (!options.DryRun)
@@ -104,6 +153,12 @@ try
             return (int)PipelineExitCode.PublishError;
         }
         logger.Info($"Manifest written: {config.ManifestOutputPath}");
+
+        // Publish succeeded end to end, so it is now safe to record these renders as done.
+        foreach (var jobKey in publishedJobKeys)
+        {
+            heroShotAdapter.CommitPendingState(jobKey);
+        }
     }
     else
     {

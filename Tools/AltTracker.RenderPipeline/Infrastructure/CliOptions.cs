@@ -1,4 +1,4 @@
-namespace AltTracker.RenderPipeline.Infrastructure;
+﻿namespace AltTracker.RenderPipeline.Infrastructure;
 
 public sealed class CliOptions
 {
@@ -6,6 +6,15 @@ public sealed class CliOptions
     public bool ForceAll { get; set; }
     public bool Verbose { get; set; }
     public bool InteractiveSelection { get; set; }
+    /// <summary>
+    /// Check the armory for updated character renders and queue any that changed.
+    ///
+    /// Required because RenderPlanner drops unchanged characters before the render adapter runs, so
+    /// a render that changed remotely (the player logged out in new gear) with no local
+    /// SavedVariables change could otherwise never produce a job. Opt-in so ordinary runs stay
+    /// offline and cheap.
+    /// </summary>
+    public bool RefreshArmory { get; set; }
     public int? MaxJobs { get; set; }
     public int? MaxAgeDaysOverride { get; set; }
     public string? ConfigPath { get; set; }
@@ -33,6 +42,9 @@ public sealed class CliOptions
                     break;
                 case "--force-all":
                     o.ForceAll = true;
+                    break;
+                case "--refresh-armory":
+                    o.RefreshArmory = true;
                     break;
                 case "--verbose":
                     o.Verbose = true;
@@ -119,6 +131,7 @@ public sealed class CliOptions
             Usage:
               --dry-run
               --force-all
+              --refresh-armory (check Battle.net for updated character renders)
               --interactive (choose all vs selected vs stale-only)
               --character <realm:account:name> (repeatable)
               --verbose

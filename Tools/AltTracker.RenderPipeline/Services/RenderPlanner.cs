@@ -1,16 +1,29 @@
-using AltTracker.RenderPipeline.Infrastructure;
+﻿using AltTracker.RenderPipeline.Infrastructure;
 using AltTracker.RenderPipeline.Models;
 
 namespace AltTracker.RenderPipeline.Services;
 
 public sealed class RenderPlanner
 {
+    /// <summary>
+    /// Whether a character passes the --character filter. Shared with the --refresh-armory
+    /// preflight so a single-character run does not revalidate every character against Battle.net.
+    /// </summary>
+    public static bool MatchesFilter(CharacterRecord character, CliOptions options)
+    {
+        if (options.CharacterFilters.Count == 0) return true;
+        return options.CharacterFilters.Contains(PathTools.BuildManifestKey(character))
+            || options.CharacterFilters.Contains(PathTools.BuildOutputBaseName(character))
+            || options.CharacterFilters.Contains(character.Name);
+    }
+
     public PlanResult BuildPlan(
         IReadOnlyList<CharacterRecord> characters,
         IReadOnlyDictionary<string, ManifestEntry> manifest,
         AppConfig config,
         CliOptions options,
-        RunLogger logger)
+        RunLogger logger,
+        IReadOnlySet<string>? armoryUpdatedKeys = null)
     {
         var jobs = new List<RenderJob>();
         var skipped = 0;
@@ -27,13 +40,15 @@ public sealed class RenderPlanner
             var expectedStagingFile = baseName + PathTools.NormalizeExtension(config.RenderSpec.PreferredStagingExtension, ".png");
 
             var reasons = new List<string>();
-            var filterMatch = options.CharacterFilters.Count == 0
-                || options.CharacterFilters.Contains(manifestKey)
-                || options.CharacterFilters.Contains(baseName)
-                || options.CharacterFilters.Contains(c.Name);
-
-            if (!filterMatch) continue;
+            if (!MatchesFilter(c, options)) continue;
             if (options.ForceAll) reasons.Add("force-all");
+            // A changed armory render is the ONLY signal for a character whose local SavedVariables
+            // are untouched (the player logged out in new gear but the addon data looks identical).
+            // Without this the character is skipped here and the render adapter never sees it.
+            if (armoryUpdatedKeys is not null && armoryUpdatedKeys.Contains(manifestKey))
+            {
+                reasons.Add("armory-render-updated");
+            }
             if (!File.Exists(finalPath)) reasons.Add("missing-output-image");
             if (!manifest.TryGetValue(manifestKey, out var entry))
             {

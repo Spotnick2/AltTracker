@@ -1,4 +1,4 @@
-namespace AltTracker.RenderPipeline.Services.HeroShot;
+﻿namespace AltTracker.RenderPipeline.Services.HeroShot;
 
 public sealed class HeroShotRequest
 {
@@ -9,4 +9,10 @@ public sealed class HeroShotRequest
     public int Height { get; init; } = 1024;
     public byte[]? ReferenceImageBytes { get; init; }
     public string ReferenceImageName { get; init; } = "reference.png";
+    /// <summary>
+    /// Raw Battle.net armory render (transparent PNG) for this character, when one exists.
+    /// Only the "armory" provider consumes it; it is the render itself, not the gray-composited
+    /// reference that is fed to the image model.
+    /// </summary>
+    public byte[]? ArmoryRenderBytes { get; init; }
 }

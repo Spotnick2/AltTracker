@@ -1,4 +1,4 @@
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using AltTracker.RenderPipeline.Infrastructure;
@@ -8,7 +8,19 @@ namespace AltTracker.RenderPipeline.Services.HeroShot;
 
 public static class HeroShotSignatureBuilder
 {
-    public static string Compute(CharacterRecord character, AppConfig.HeroShotConfig cfg)
+    /// <param name="referenceFingerprint">
+    /// Hash of the reference image actually used. Part of the signature because the reference now
+    /// refreshes itself from the armory: without it, a character who logs out in new gear would
+    /// keep the old portrait forever, since nothing else in the signature would have changed.
+    /// </param>
+    /// <param name="effectiveProvider">
+    /// The provider actually used for this character, which may differ from cfg.Provider because of
+    /// a per-character override. Hashing the global default instead would mean flipping one
+    /// character between codex and armory did not invalidate its cached render.
+    /// </param>
+    public static string Compute(
+        CharacterRecord character, AppConfig.HeroShotConfig cfg, string referenceFingerprint = "",
+        string? effectiveProvider = null)
     {
         var gearEntries = CharacterRecord.GearSlots
             .Select(slot => $"{slot}:{character.GearItemIds.GetValueOrDefault(slot, 0)}")
@@ -24,7 +36,7 @@ public static class HeroShotSignatureBuilder
             ["style"] = cfg.Style ?? "realistic",
             ["promptTemplateVersion"] = cfg.PromptTemplateVersion ?? "v1",
             ["generationVersion"] = cfg.GenerationVersion ?? "1",
-            ["provider"] = cfg.Provider ?? "codex",
+            ["provider"] = effectiveProvider ?? cfg.Provider ?? "codex",
             ["model"] = cfg.Model ?? "gpt-image-1",
             ["width"] = cfg.Width,
             ["height"] = cfg.Height,
@@ -34,6 +46,7 @@ public static class HeroShotSignatureBuilder
             ["cropMode"] = cfg.CropMode ?? "cover",
             ["anchor"] = cfg.Anchor ?? "center",
             ["format"] = cfg.Format ?? "tga",
+            ["referenceFingerprint"] = referenceFingerprint ?? "",
         };
 
         var json = JsonSerializer.Serialize(canonical, new JsonSerializerOptions

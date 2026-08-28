@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using AltTracker.RenderPipeline.Services;
 
 namespace AltTracker.RenderPipeline.Infrastructure;
@@ -20,6 +20,7 @@ public sealed class AppConfig
     public string Resolution { get; set; } = "512x512";
     public RenderSpecConfig RenderSpec { get; set; } = new();
     public HeroShotConfig HeroShot { get; set; } = new();
+    public BattleNetConfig BattleNet { get; set; } = new();
 
     public sealed class RenderSpecConfig
     {
@@ -55,6 +56,11 @@ public sealed class AppConfig
         public int MaxRetries { get; set; } = 2;
         public Dictionary<string, string> CharacterReferenceImages { get; set; } = new();
         /// <summary>
+        /// Per-character provider override, keyed "Realm:Account:Name". Lets individual characters
+        /// use the raw armory render ("armory") while the rest keep AI generation ("codex").
+        /// </summary>
+        public Dictionary<string, string> CharacterProviders { get; set; } = new();
+        /// <summary>
         /// When true, characters without a resolved reference image are skipped rather than
         /// generating a text-only portrait. Recommended, since a reference image is essential
         /// for identity accuracy in codex imagegen.
@@ -79,6 +85,38 @@ public sealed class AppConfig
             /// transmog, but adds a browsing step per render and consumes OpenAI usage. Default off.</summary>
             public bool EnableWebSearch { get; set; } = false;
         }
+    }
+
+    /// <summary>
+    /// Battle.net API settings for sourcing character renders from the armory.
+    ///
+    /// Credentials are deliberately absent: appsettings.json is git-tracked, so the client secret
+    /// comes from the environment only (see BattleNetCredentials).
+    /// </summary>
+    public sealed class BattleNetConfig
+    {
+        public bool Enabled { get; set; } = false;
+        /// <summary>API region host prefix, e.g. "us" -> us.api.blizzard.com. Single region per run.</summary>
+        public string Region { get; set; } = "us";
+        /// <summary>Profile namespace. Anniversary realms use classicann-{region}.</summary>
+        public string Namespace { get; set; } = "profile-classicann-us";
+        /// <summary>Namespace for the realm index, used to resolve canonical realm slugs.</summary>
+        public string RealmNamespace { get; set; } = "dynamic-classicann-us";
+        public int TimeoutSeconds { get; set; } = 30;
+        /// <summary>Where cached renders live. Defaults to {TempPath}/blizzard.</summary>
+        public string CacheDirectory { get; set; } = "";
+        /// <summary>
+        /// Opaque backdrop the trimmed render is flattened onto before it reaches the image model.
+        /// Neutral gray by default: a saturated colour (e.g. the class colour) injects a large
+        /// palette cue that the model tends to echo back into armour and lighting.
+        /// </summary>
+        public string ReferenceBackground { get; set; } = "#808080";
+        /// <summary>Padding added around the trimmed subject, as a fraction of its size.</summary>
+        public double PaddingFraction { get; set; } = 0.08;
+        /// <summary>Alpha value a pixel must exceed to count as part of the subject.</summary>
+        public int AlphaThreshold { get; set; } = 8;
+        /// <summary>Realm name -> slug overrides, for realms the index does not resolve.</summary>
+        public Dictionary<string, string> RealmSlugOverrides { get; set; } = new();
     }
 
     public static AppConfig Load(CliOptions options, RunLogger logger)
