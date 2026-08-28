@@ -4,3 +4,5 @@
 
 # Packaged share zips (built by staging the deployable addon folders)
 dist/
+
+__pycache__/
