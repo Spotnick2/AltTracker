@@ -2163,15 +2163,34 @@ local function CreateFrameIfNeeded()
     --------------------------------------------------------
 
     -- Options content: sized to fit inside the content area
-    local optionsFrame = CreateFrame("Frame", nil, frame)
-    optionsFrame:SetPoint("TOPLEFT", frame, "TOPLEFT", SIDEBAR_WIDTH + 1, -TITLE_H)
-    optionsFrame:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 1)
-    optionsFrame:Hide()
+    -- optionsPanel is the visible container; optionsFrame is the scrolling content
+    -- inside it and stays the parent for every control built below.
+    --
+    -- The content is taller than the panel at the default window size and grows with
+    -- plugin and sync-peer rows, so without a scroll frame the lower controls (Sync
+    -- Peers, Toast, Mail) are simply unreachable — there is no way to scroll to them
+    -- and the window cannot be made tall enough.
+    local optionsPanel = CreateFrame("Frame", nil, frame)
+    optionsPanel:SetPoint("TOPLEFT", frame, "TOPLEFT", SIDEBAR_WIDTH + 1, -TITLE_H)
+    optionsPanel:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 1)
+    optionsPanel:Hide()
 
     -- Background
-    local optBG = optionsFrame:CreateTexture(nil, "BACKGROUND")
+    local optBG = optionsPanel:CreateTexture(nil, "BACKGROUND")
     optBG:SetAllPoints()
     optBG:SetColorTexture(unpack(AltTracker.C.BG_MAIN))
+
+    local optionsScroll = CreateFrame("ScrollFrame", nil, optionsPanel, "UIPanelScrollFrameTemplate")
+    optionsScroll:SetPoint("TOPLEFT", optionsPanel, "TOPLEFT", 0, 0)
+    optionsScroll:SetPoint("BOTTOMRIGHT", optionsPanel, "BOTTOMRIGHT", -26, 0)  -- room for the scrollbar
+
+    local optionsFrame = CreateFrame("Frame", nil, optionsScroll)
+    optionsFrame:SetSize(1, 1)
+    optionsScroll:SetScrollChild(optionsFrame)
+    -- Keep the content as wide as the viewport so the panel reflows on resize.
+    optionsScroll:SetScript("OnSizeChanged", function(self, w)
+        if w and w > 0 then optionsFrame:SetWidth(w) end
+    end)
 
     -- ── Layout ──────────────────────────────────────────────
     -- We build everything at fixed offsets from TOPLEFT so
@@ -2268,7 +2287,7 @@ local function CreateFrameIfNeeded()
     end
     -- Sync when accent changes (sidebar callback won't call SwitchSection)
     AltTracker.RegisterThemeCallback(function()
-        if optionsFrame:IsShown() then RefreshThemeBtns() end
+        if optionsPanel:IsShown() then RefreshThemeBtns() end
     end)
 
     optDarkBtn:SetScript("OnClick", function()
@@ -2485,7 +2504,7 @@ local function CreateFrameIfNeeded()
     end
     RefreshBisBtns()
     AltTracker.RegisterThemeCallback(function()
-        if optionsFrame:IsShown() then RefreshBisBtns() end
+        if optionsPanel:IsShown() then RefreshBisBtns() end
     end)
 
     Y = Y - 26
@@ -2786,8 +2805,14 @@ local function CreateFrameIfNeeded()
     optHint:SetText("Class theme uses the current player class color as the UI accent. "
         .."Character rows still use each character's own class color.")
 
-    -- OnShow: safely refresh all controls from saved config
-    optionsFrame:SetScript("OnShow", function()
+    -- Content height is known once the layout cursor has run; the scroll range
+    -- derives from it. Extra padding covers the wrapped hint text below.
+    optionsFrame:SetHeight(math.abs(Y) + 60)
+
+    -- OnShow: safely refresh all controls from saved config.
+    -- Bound to the panel, not the content: the scroll child is always shown, so an
+    -- OnShow there would never fire when Options is opened.
+    optionsPanel:SetScript("OnShow", function()
         AltTrackerConfig = AltTrackerConfig or {}
         if AltTracker.EnsureConfigDefaults then
             AltTracker.EnsureConfigDefaults()
@@ -2835,11 +2860,11 @@ local function CreateFrameIfNeeded()
                 f.bodyScroll:Hide(); f.frozenScroll:Hide()
                 f.headerScroll:Hide(); f.frozenHeader:Hide()
                 f.hScrollBar:Hide(); f.totalsBar:Hide()
-                optionsFrame:Show()
+                optionsPanel:Show()
                 ResizeFrame(820, 760)
             end,
             OnDeactivate = function(f)
-                optionsFrame:Hide()
+                optionsPanel:Hide()
                 f.totalsBar:Show()
             end,
         }

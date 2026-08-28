@@ -192,29 +192,49 @@ function AltTracker.GetBisTierLabel(key)
     return key
 end
 
+-- WoW's paired slots are interchangeable: the game does not care whether a ring
+-- sits in ring1 or ring2, nor which trinket is in which socket. Matching strictly
+-- against the physical slot means a player wearing exactly the right pair, but in
+-- the opposite order, loses credit for BOTH slots and sees wrong replacement
+-- tooltips. Look each paired slot up against the union of the pair.
+local SLOT_PARTNER = {
+    ring1    = "ring2",   ring2    = "ring1",
+    trinket1 = "trinket2", trinket2 = "trinket1",
+}
+
+-- Acceptable BiS names for one slot, always as a list (the data allows either a
+-- bare string or a table).
+local function BisNamesForSlot(tierData, slotKey)
+    local items = tierData and tierData[slotKey]
+    if type(items) == "string" then return { items } end
+    if type(items) == "table"  then return items end
+    return nil
+end
+
+local function BisTierData(class, spec)
+    local bisData = AltTracker.BisData
+    if not bisData then return nil end
+    local classData = bisData[class]
+    if not classData then return nil end
+    local specData = classData[spec]
+    if not specData then return nil end
+    return specData[CurrentTier()]
+end
+
 local function IsItemBis(class, spec, slotKey, itemName)
     if not itemName or itemName == "" then return nil end
     if not class or not spec then return nil end
 
-    local bisData = AltTracker.BisData
-    if not bisData then return nil end
-
-    local classData = bisData[class]
-    if not classData then return nil end
-
-    local specData = classData[spec]
-    if not specData then return nil end
+    local tierData = BisTierData(class, spec)
+    if not tierData then return nil end
 
     local tier = CurrentTier()
-    local tierData = specData[tier]
-    if not tierData or not tierData[slotKey] then return nil end
-
-    local items = tierData[slotKey]
-    if type(items) == "string" then
-        if items == itemName then return tier end
-    elseif type(items) == "table" then
-        for _, bisName in ipairs(items) do
-            if bisName == itemName then return tier end
+    for _, key in ipairs({ slotKey, SLOT_PARTNER[slotKey] }) do
+        local names = key and BisNamesForSlot(tierData, key)
+        if names then
+            for _, bisName in ipairs(names) do
+                if bisName == itemName then return tier end
+            end
         end
     end
     return nil
@@ -253,15 +273,55 @@ local ALL_GEAR_KEYS = {
 }
 local MAX_GEAR_SLOTS = #ALL_GEAR_KEYS  -- 17
 
+-- Credit for one interchangeable slot pair. The two equipped items are matched
+-- against the pair's combined BiS entries as SETS, consuming each entry at most
+-- once. Counting the two slots independently through IsItemBis would award 2/2 to
+-- a player wearing two copies of the same non-unique BiS ring.
+local function CountBisForPair(tierData, char, slotA, slotB)
+    if not tierData then return 0 end
+
+    local pool = {}
+    for _, key in ipairs({ slotA, slotB }) do
+        local names = BisNamesForSlot(tierData, key)
+        if names then
+            for _, n in ipairs(names) do pool[#pool + 1] = n end
+        end
+    end
+
+    local credited = 0
+    for _, key in ipairs({ slotA, slotB }) do
+        local worn = char["gearname_"..key] or ""
+        if worn ~= "" then
+            for i, n in ipairs(pool) do
+                if n == worn then
+                    table.remove(pool, i)
+                    credited = credited + 1
+                    break
+                end
+            end
+        end
+    end
+    return credited
+end
+
+-- Slots handled by CountBisForPair rather than one at a time.
+local PAIRED_SLOTS = { ring1=true, ring2=true, trinket1=true, trinket2=true }
+
 -- Internal helper: count BiS items for an explicit spec override
 local function CountBisForSpec(char, specOverride)
     local count = 0
     for _, slotKey in ipairs(ALL_GEAR_KEYS) do
-        local itemName = char["gearname_"..slotKey] or ""
-        if IsItemBis(char.class, specOverride, slotKey, itemName) then
-            count = count + 1
+        if not PAIRED_SLOTS[slotKey] then
+            local itemName = char["gearname_"..slotKey] or ""
+            if IsItemBis(char.class, specOverride, slotKey, itemName) then
+                count = count + 1
+            end
         end
     end
+
+    local tierData = BisTierData(char.class, specOverride)
+    count = count + CountBisForPair(tierData, char, "ring1", "ring2")
+    count = count + CountBisForPair(tierData, char, "trinket1", "trinket2")
     -- 2H bonus
     local colorCount = count
     local ohIlvl = char.gear_offhand or 0
@@ -286,23 +346,18 @@ local function CountBisItems(char)
         return catCount, catRatio
     end
 
-    -- All other specs: standard path
-    local count = 0
-    for _, slotKey in ipairs(ALL_GEAR_KEYS) do
-        local itemName = char["gearname_"..slotKey] or ""
-        if IsItemBis(char.class, char.spec, slotKey, itemName) then
-            count = count + 1
-        end
-    end
-    local colorCount = count
-    local ohIlvl = char.gear_offhand or 0
-    local mhName = char.gearname_mainhand or ""
-    if ohIlvl == 0 and IsItemBis(char.class, char.spec, "mainhand", mhName) then
-        colorCount = colorCount + 1
-    end
-    local ratio = colorCount / MAX_GEAR_SLOTS
-    return count, math.min(ratio, 1.0)
+    -- All other specs: the same scoring, just against the character's own spec.
+    -- This used to be a second, near-identical copy of CountBisForSpec's body,
+    -- which meant fixes to the scoring only reached the Feral Combat branch.
+    return CountBisForSpec(char, char.spec)
 end
+
+-- Test seam (matches the AltTracker._test convention in Core.lua): the scoring
+-- functions stay local so the row renderer remains a closed unit, but the BiS
+-- suite needs to exercise slot pairing directly.
+AltTracker._test = AltTracker._test or {}
+AltTracker._test.CountBisItems = CountBisItems
+AltTracker._test.IsItemBis     = IsItemBis
 
 ------------------------------------------------------------
 -- BiS count gradient: grey (0) → white → green → orange
@@ -447,14 +502,27 @@ local function IlvlToColor(ilvl)
     local PURPLE_LOW  = { r=0.47, g=0.20, b=0.73 }  -- #7833BA muted blue-purple
     local PURPLE_HIGH = { r=0.78, g=0.30, b=1.00 }  -- #C74DFF vivid rich purple
 
+    -- The band thresholds above are absolute, but `ceiling` is now per-phase. A low
+    -- ceiling would otherwise collapse or invert the top bands: at T4 (125) the purple
+    -- ramp has zero width, and at Pre-Raid (115) the ceiling sits *below* ILVL_EPIC, so
+    -- every blue-tier item jumps straight to vivid purple. Pull each floor down only as
+    -- far as needed to keep the bands ordered and non-empty. Phases whose ceiling is
+    -- comfortably above ILVL_EPIC (T5 and up) are unaffected and keep today's colours.
     local ceiling = IlvlCeiling()
-    if     ilvl >= ceiling   then return PURPLE_HIGH
-    elseif ilvl >= ILVL_EPIC then return LerpColor(PURPLE_LOW, PURPLE_HIGH, (ilvl - ILVL_EPIC) / (ceiling - ILVL_EPIC))
-    elseif ilvl >= ILVL_RARE    then return LerpColor(BLUE,       PURPLE_LOW,  (ilvl - ILVL_RARE) / (ILVL_EPIC - ILVL_RARE))
-    elseif ilvl >= ILVL_UNCOMMON then return LerpColor(GREEN,      BLUE,        (ilvl - ILVL_UNCOMMON) / (ILVL_RARE - ILVL_UNCOMMON))
-    elseif ilvl >= ILVL_COMMON  then return LerpColor(WHITE,      GREEN,       (ilvl - ILVL_COMMON) / (ILVL_UNCOMMON - ILVL_COMMON))
-    elseif ilvl >= ILVL_POOR   then return LerpColor(GREY,       WHITE,       (ilvl - ILVL_POOR) / (ILVL_COMMON - ILVL_POOR))
-    else                            return GREY
+    local MIN_BAND = 8
+    local epic     = math.min(ILVL_EPIC,     ceiling  - MIN_BAND)
+    local rare     = math.min(ILVL_RARE,     epic     - MIN_BAND)
+    local uncommon = math.min(ILVL_UNCOMMON, rare     - MIN_BAND)
+    local common   = math.min(ILVL_COMMON,   uncommon - MIN_BAND)
+    local poor     = math.min(ILVL_POOR,     common   - MIN_BAND)
+
+    if     ilvl >= ceiling  then return PURPLE_HIGH
+    elseif ilvl >= epic     then return LerpColor(PURPLE_LOW, PURPLE_HIGH, (ilvl - epic)     / (ceiling  - epic))
+    elseif ilvl >= rare     then return LerpColor(BLUE,       PURPLE_LOW,  (ilvl - rare)     / (epic     - rare))
+    elseif ilvl >= uncommon then return LerpColor(GREEN,      BLUE,        (ilvl - uncommon) / (rare     - uncommon))
+    elseif ilvl >= common   then return LerpColor(WHITE,      GREEN,       (ilvl - common)   / (uncommon - common))
+    elseif ilvl >= poor     then return LerpColor(GREY,       WHITE,       (ilvl - poor)     / (common   - poor))
+    else                         return GREY
     end
 end
 

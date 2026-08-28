@@ -155,6 +155,83 @@ for _, t in ipairs(AltTracker.BIS_TIERS) do
 end
 
 ------------------------------------------------------------
+------------------------------------------------------------
+-- Interchangeable slots: ring1/ring2 and trinket1/trinket2
+--
+-- WoW does not care which ring goes in which socket. Scoring strictly by
+-- physical slot meant a player wearing exactly the right pair in the opposite
+-- order lost credit for BOTH slots. These pin the pairing behaviour down.
+------------------------------------------------------------
+
+local countBis = assert(AltTracker._test and AltTracker._test.CountBisItems,
+                        "CountBisItems test seam missing")
+local isBis     = assert(AltTracker._test and AltTracker._test.IsItemBis,
+                        "IsItemBis test seam missing")
+
+-- Find any class/spec whose current-tier list names two different rings and
+-- two different trinkets, so the swap is actually observable.
+local function FindPairedFixture(tier)
+    for class, specs in pairs(AltTracker.BisData) do
+        for spec, tiers in pairs(specs) do
+            local t = tiers[tier]
+            local function one(slot)
+                local v = t and t[slot]
+                if type(v) == "string" then return v end
+                if type(v) == "table" then return v[1] end
+                return nil
+            end
+            local r1, r2 = one("ring1"), one("ring2")
+            local t1, t2 = one("trinket1"), one("trinket2")
+            if r1 and r2 and r1 ~= r2 and t1 and t2 and t1 ~= t2 then
+                return class, spec, t, r1, r2, t1, t2
+            end
+        end
+    end
+end
+
+AltTrackerConfig.bisTier = "T6"
+local class, spec, tierData, r1, r2, t1, t2 = FindPairedFixture("T6")
+check(class ~= nil, "no class/spec with two distinct rings and trinkets at T6")
+
+if class then
+    -- Each ring is BiS in EITHER socket, and likewise each trinket.
+    check(isBis(class, spec, "ring1", r2), "ring2's item should be BiS in ring1")
+    check(isBis(class, spec, "ring2", r1), "ring1's item should be BiS in ring2")
+    check(isBis(class, spec, "trinket1", t2), "trinket2's item should be BiS in trinket1")
+    check(isBis(class, spec, "trinket2", t1), "trinket1's item should be BiS in trinket2")
+
+    -- A non-BiS item is still rejected in both sockets.
+    check(not isBis(class, spec, "ring1", "Definitely Not A Real Ring"),
+          "unknown ring must not be BiS")
+
+    -- Build a character wearing the full BiS set, then the same set with the
+    -- pairs swapped. Both must score identically.
+    local function CharWith(swap)
+        local c = { class = class, spec = spec, gear_offhand = 1 }
+        for slot, v in pairs(tierData) do
+            local name = type(v) == "table" and v[1] or v
+            if type(name) == "string" then c["gearname_"..slot] = name end
+        end
+        if swap then
+            c.gearname_ring1,    c.gearname_ring2    = r2, r1
+            c.gearname_trinket1, c.gearname_trinket2 = t2, t1
+        end
+        return c
+    end
+
+    local straightCount = countBis(CharWith(false))
+    local swappedCount  = countBis(CharWith(true))
+    eq(swappedCount, straightCount, "swapped ring/trinket pair must score the same")
+    check(straightCount >= 4, "fixture should score at least the four paired slots")
+
+    -- Wearing one BiS ring twice must not be credited twice: the pair's entries
+    -- are consumed at most once each.
+    local dup = CharWith(false)
+    dup.gearname_ring2 = r1
+    local dupCount = countBis(dup)
+    eq(dupCount, straightCount - 1, "duplicate BiS ring must score once, not twice")
+end
+
 if failures > 0 then
     print("bis tests FAILED: " .. failures .. " of " .. testsRun)
     os.exit(1)
