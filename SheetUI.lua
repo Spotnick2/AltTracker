@@ -2163,15 +2163,34 @@ local function CreateFrameIfNeeded()
     --------------------------------------------------------
 
     -- Options content: sized to fit inside the content area
-    local optionsFrame = CreateFrame("Frame", nil, frame)
-    optionsFrame:SetPoint("TOPLEFT", frame, "TOPLEFT", SIDEBAR_WIDTH + 1, -TITLE_H)
-    optionsFrame:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 1)
-    optionsFrame:Hide()
+    -- optionsPanel is the visible container; optionsFrame is the scrolling content
+    -- inside it and stays the parent for every control built below.
+    --
+    -- The content is taller than the panel at the default window size and grows with
+    -- plugin and sync-peer rows, so without a scroll frame the lower controls (Sync
+    -- Peers, Toast, Mail) are simply unreachable — there is no way to scroll to them
+    -- and the window cannot be made tall enough.
+    local optionsPanel = CreateFrame("Frame", nil, frame)
+    optionsPanel:SetPoint("TOPLEFT", frame, "TOPLEFT", SIDEBAR_WIDTH + 1, -TITLE_H)
+    optionsPanel:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 1)
+    optionsPanel:Hide()
 
     -- Background
-    local optBG = optionsFrame:CreateTexture(nil, "BACKGROUND")
+    local optBG = optionsPanel:CreateTexture(nil, "BACKGROUND")
     optBG:SetAllPoints()
     optBG:SetColorTexture(unpack(AltTracker.C.BG_MAIN))
+
+    local optionsScroll = CreateFrame("ScrollFrame", nil, optionsPanel, "UIPanelScrollFrameTemplate")
+    optionsScroll:SetPoint("TOPLEFT", optionsPanel, "TOPLEFT", 0, 0)
+    optionsScroll:SetPoint("BOTTOMRIGHT", optionsPanel, "BOTTOMRIGHT", -26, 0)  -- room for the scrollbar
+
+    local optionsFrame = CreateFrame("Frame", nil, optionsScroll)
+    optionsFrame:SetSize(1, 1)
+    optionsScroll:SetScrollChild(optionsFrame)
+    -- Keep the content as wide as the viewport so the panel reflows on resize.
+    optionsScroll:SetScript("OnSizeChanged", function(self, w)
+        if w and w > 0 then optionsFrame:SetWidth(w) end
+    end)
 
     -- ── Layout ──────────────────────────────────────────────
     -- We build everything at fixed offsets from TOPLEFT so
@@ -2268,7 +2287,7 @@ local function CreateFrameIfNeeded()
     end
     -- Sync when accent changes (sidebar callback won't call SwitchSection)
     AltTracker.RegisterThemeCallback(function()
-        if optionsFrame:IsShown() then RefreshThemeBtns() end
+        if optionsPanel:IsShown() then RefreshThemeBtns() end
     end)
 
     optDarkBtn:SetScript("OnClick", function()
@@ -2420,6 +2439,84 @@ local function CreateFrameIfNeeded()
         lbl:SetTextColor(unpack(AltTracker.C.TEXT_NORM))
         return cb
     end
+
+    -- ── Best in Slot section ───────────────────────────────
+    -- Picks which raid phase the BiS column and the gear-slot tooltips
+    -- compare against. Rendered as a segmented row rather than a dropdown
+    -- so every phase is visible at a glance and selecting one is a single
+    -- click, matching the Theme row's idiom above.
+    local optBisHdr = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    optBisHdr:SetPoint("TOPLEFT", P, Y)
+    optBisHdr:SetText("BEST IN SLOT")
+    optBisHdr:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+    Y = Y - 20
+
+    local optBisLabel = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    optBisLabel:SetPoint("TOPLEFT", P, Y)
+    optBisLabel:SetText("Phase")
+    optBisLabel:SetTextColor(unpack(AltTracker.C.TEXT_NORM))
+
+    local optBisBtns = {}
+    local BIS_BTN_W, BIS_BTN_H = 54, 22
+    local prevBisBtn
+    for _, tier in ipairs(AltTracker.BIS_TIERS or {}) do
+        local btn = CreateFrame("Button", nil, optionsFrame, "BackdropTemplate")
+        btn:SetSize(BIS_BTN_W, BIS_BTN_H)
+        if prevBisBtn then
+            btn:SetPoint("LEFT", prevBisBtn, "RIGHT", 6, 0)
+        else
+            btn:SetPoint("TOPLEFT", P + 60, Y + 1)
+        end
+        AltTracker.ApplyBackdrop(btn, 0.12, 0.12, 0.12, 1)
+        local lbl = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        lbl:SetAllPoints(); lbl:SetJustifyH("CENTER"); lbl:SetText(tier.label)
+        btn._key, btn._lbl = tier.key, lbl
+        optBisBtns[#optBisBtns + 1] = btn
+        prevBisBtn = btn
+    end
+
+    local function RefreshBisBtns()
+        local cur = AltTracker.GetBisTier and AltTracker.GetBisTier() or "T6"
+        local ar, ag, ab = AltTracker.GetAccentRGB()
+        for _, btn in ipairs(optBisBtns) do
+            if btn._key == cur then
+                btn:SetBackdropColor(
+                    AltTracker.C.BG_BTN_ACTIVE[1], AltTracker.C.BG_BTN_ACTIVE[2],
+                    AltTracker.C.BG_BTN_ACTIVE[3], AltTracker.C.BG_BTN_ACTIVE[4])
+                btn:SetBackdropBorderColor(ar, ag, ab, 1)
+                btn._lbl:SetTextColor(ar, ag, ab)
+            else
+                btn:SetBackdropColor(0.12, 0.12, 0.12, 1)
+                btn:SetBackdropBorderColor(0, 0, 0, 1)
+                btn._lbl:SetTextColor(unpack(AltTracker.C.TEXT_NORM))
+            end
+        end
+    end
+    for _, btn in ipairs(optBisBtns) do
+        btn:SetScript("OnClick", function(self)
+            AltTrackerConfig = AltTrackerConfig or {}
+            AltTrackerConfig.bisTier = self._key
+            RefreshBisBtns()
+            -- Re-render so the BiS column, its ratio colour and the iLvl
+            -- gradient all pick up the new phase immediately.
+            if AltTracker.RefreshSheet then AltTracker.RefreshSheet() end
+        end)
+    end
+    RefreshBisBtns()
+    AltTracker.RegisterThemeCallback(function()
+        if optionsPanel:IsShown() then RefreshBisBtns() end
+    end)
+
+    Y = Y - 26
+
+    local optBisHint = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    optBisHint:SetPoint("TOPLEFT", P, Y)
+    optBisHint:SetPoint("RIGHT", optionsFrame, "RIGHT", -P, 0)
+    optBisHint:SetJustifyH("LEFT"); optBisHint:SetWordWrap(true)
+    optBisHint:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+    optBisHint:SetText("Which raid phase the BiS column and gear tooltips compare against. Also rescales the item-level colour gradient.")
+
+    Y = Y - 30
 
     -- ── Plugins section ────────────────────────────────────
     -- Recipes and Roster are LoadOnDemand addons; toggling one loads it
@@ -2708,8 +2805,14 @@ local function CreateFrameIfNeeded()
     optHint:SetText("Class theme uses the current player class color as the UI accent. "
         .."Character rows still use each character's own class color.")
 
-    -- OnShow: safely refresh all controls from saved config
-    optionsFrame:SetScript("OnShow", function()
+    -- Content height is known once the layout cursor has run; the scroll range
+    -- derives from it. Extra padding covers the wrapped hint text below.
+    optionsFrame:SetHeight(math.abs(Y) + 60)
+
+    -- OnShow: safely refresh all controls from saved config.
+    -- Bound to the panel, not the content: the scroll child is always shown, so an
+    -- OnShow there would never fire when Options is opened.
+    optionsPanel:SetScript("OnShow", function()
         AltTrackerConfig = AltTrackerConfig or {}
         if AltTracker.EnsureConfigDefaults then
             AltTracker.EnsureConfigDefaults()
@@ -2757,11 +2860,11 @@ local function CreateFrameIfNeeded()
                 f.bodyScroll:Hide(); f.frozenScroll:Hide()
                 f.headerScroll:Hide(); f.frozenHeader:Hide()
                 f.hScrollBar:Hide(); f.totalsBar:Hide()
-                optionsFrame:Show()
+                optionsPanel:Show()
                 ResizeFrame(820, 760)
             end,
             OnDeactivate = function(f)
-                optionsFrame:Hide()
+                optionsPanel:Hide()
                 f.totalsBar:Show()
             end,
         }

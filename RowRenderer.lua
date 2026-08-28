@@ -151,36 +151,90 @@ end
 
 ------------------------------------------------------------
 -- BiS lookup
--- Returns CURRENT_TIER if the item is BiS for the active tier, else nil.
--- Only the current phase's BiS list counts: previous-tier gear is no
--- longer marked, and the BiS column ratio reflects current-tier progress.
+-- Returns the active tier name if the item is BiS for it, else nil.
+-- Only the selected phase's BiS list counts: other tiers' gear is not
+-- marked, and the BiS column ratio reflects that phase's progress.
+--
+-- The phase is chosen by the user in Options ▸ Best in Slot and stored
+-- in AltTrackerConfig.bisTier; AltTracker.BIS_TIERS is the ordered list
+-- the options UI renders. Defaults to T6.
 ------------------------------------------------------------
 
--- *** TUNE THIS VALUE EACH PHASE ***
-local CURRENT_TIER = "T5"
+AltTracker.BIS_TIERS = {
+    { key = "PreRaid", label = "Pre-Raid", ceiling = 115 },
+    { key = "T4",      label = "T4",       ceiling = 125 },
+    { key = "T5",      label = "T5",       ceiling = 141 },
+    { key = "T6",      label = "T6",       ceiling = 154 },
+    { key = "ZA",      label = "ZA",       ceiling = 154 },
+    { key = "Sunwell", label = "SWP",      ceiling = 164 },
+}
+AltTracker.BIS_TIER_DEFAULT = "T6"
+
+-- Resolve the configured tier, falling back to the default if the saved
+-- value is missing or names a tier this build no longer ships.
+function AltTracker.GetBisTier()
+    local want = AltTrackerConfig and AltTrackerConfig.bisTier
+    for _, t in ipairs(AltTracker.BIS_TIERS) do
+        if t.key == want then return t.key end
+    end
+    return AltTracker.BIS_TIER_DEFAULT
+end
+
+local function CurrentTier()
+    return AltTracker.GetBisTier()
+end
+
+-- Display name for a tier key ("PreRaid" -> "Pre-Raid", "Sunwell" -> "SWP").
+function AltTracker.GetBisTierLabel(key)
+    for _, t in ipairs(AltTracker.BIS_TIERS) do
+        if t.key == key then return t.label end
+    end
+    return key
+end
+
+-- WoW's paired slots are interchangeable: the game does not care whether a ring
+-- sits in ring1 or ring2, nor which trinket is in which socket. Matching strictly
+-- against the physical slot means a player wearing exactly the right pair, but in
+-- the opposite order, loses credit for BOTH slots and sees wrong replacement
+-- tooltips. Look each paired slot up against the union of the pair.
+local SLOT_PARTNER = {
+    ring1    = "ring2",   ring2    = "ring1",
+    trinket1 = "trinket2", trinket2 = "trinket1",
+}
+
+-- Acceptable BiS names for one slot, always as a list (the data allows either a
+-- bare string or a table).
+local function BisNamesForSlot(tierData, slotKey)
+    local items = tierData and tierData[slotKey]
+    if type(items) == "string" then return { items } end
+    if type(items) == "table"  then return items end
+    return nil
+end
+
+local function BisTierData(class, spec)
+    local bisData = AltTracker.BisData
+    if not bisData then return nil end
+    local classData = bisData[class]
+    if not classData then return nil end
+    local specData = classData[spec]
+    if not specData then return nil end
+    return specData[CurrentTier()]
+end
 
 local function IsItemBis(class, spec, slotKey, itemName)
     if not itemName or itemName == "" then return nil end
     if not class or not spec then return nil end
 
-    local bisData = AltTracker.BisData
-    if not bisData then return nil end
+    local tierData = BisTierData(class, spec)
+    if not tierData then return nil end
 
-    local classData = bisData[class]
-    if not classData then return nil end
-
-    local specData = classData[spec]
-    if not specData then return nil end
-
-    local tierData = specData[CURRENT_TIER]
-    if not tierData or not tierData[slotKey] then return nil end
-
-    local items = tierData[slotKey]
-    if type(items) == "string" then
-        if items == itemName then return CURRENT_TIER end
-    elseif type(items) == "table" then
-        for _, bisName in ipairs(items) do
-            if bisName == itemName then return CURRENT_TIER end
+    local tier = CurrentTier()
+    for _, key in ipairs({ slotKey, SLOT_PARTNER[slotKey] }) do
+        local names = key and BisNamesForSlot(tierData, key)
+        if names then
+            for _, bisName in ipairs(names) do
+                if bisName == itemName then return tier end
+            end
         end
     end
     return nil
@@ -189,17 +243,60 @@ end
 -- Returns the primary BiS item name for a slot (the first entry when a table
 -- of alternatives is listed), used to render the side-by-side comparison
 -- tooltip in the Gear Progression grid.
-local function GetBisItemName(class, spec, slotKey)
+-- Replacement suggested in a gear tooltip for a slot the character has not filled
+-- with a BiS item.
+--
+-- For the interchangeable pairs this must consider what is worn in the PARTNER
+-- slot. Scoring already treats ring1/ring2 as one set, so recommending the entry
+-- nominally assigned to this physical socket can suggest an item the character is
+-- already wearing in the other one — and equipping it would not raise the score,
+-- because CountBisForPair consumes each entry only once. Recommend an entry that
+-- is still missing instead.
+local function GetBisItemName(class, spec, slotKey, char)
     if not class or not spec or not slotKey then return nil end
-    local bisData = AltTracker.BisData
-    if not bisData then return nil end
-    local classData = bisData[class]; if not classData then return nil end
-    local specData = classData[spec]; if not specData then return nil end
-    local tierData = specData[CURRENT_TIER]; if not tierData then return nil end
-    local items = tierData[slotKey]
-    if type(items) == "string" then return items
-    elseif type(items) == "table" then return items[1] end
-    return nil
+    local tierData = BisTierData(class, spec)
+    if not tierData then return nil end
+
+    local partner = SLOT_PARTNER[slotKey]
+    if not partner or not char then
+        local items = BisNamesForSlot(tierData, slotKey)
+        return items and items[1] or nil
+    end
+
+    -- Combined ordered pool: this slot's own entries first so the ordinary case keeps
+    -- its usual answer, then the partner's.
+    local pool = {}
+    for _, key in ipairs({ slotKey, partner }) do
+        local names = BisNamesForSlot(tierData, key)
+        if names then
+            for _, name in ipairs(names) do pool[#pool + 1] = name end
+        end
+    end
+
+    -- Consume exactly ONE copy of whatever is worn in the partner slot, mirroring
+    -- CountBisForPair. Several shipped lists intentionally name the same non-unique
+    -- item for both slots (Ring of Ancient Knowledge fills both ring slots for a
+    -- number of specs), and there a SECOND copy is genuinely the right advice -
+    -- dropping every match would recommend nothing while scoring still awards the
+    -- point for equipping one.
+    -- Both sockets are consumed, one occurrence each. The partner is the case that
+    -- matters in practice; this slot's own item is consumed too so the function is
+    -- correct standalone rather than relying on the caller only asking about slots
+    -- that already failed the BiS check.
+    local function ConsumeOne(worn)
+        if not worn or worn == "" then return end
+        for i, name in ipairs(pool) do
+            if name == worn then
+                table.remove(pool, i)
+                return
+            end
+        end
+    end
+
+    ConsumeOne(char["gearname_"..partner])
+    ConsumeOne(char["gearname_"..slotKey])
+
+    return pool[1]
 end
 
 ------------------------------------------------------------
@@ -219,15 +316,55 @@ local ALL_GEAR_KEYS = {
 }
 local MAX_GEAR_SLOTS = #ALL_GEAR_KEYS  -- 17
 
+-- Credit for one interchangeable slot pair. The two equipped items are matched
+-- against the pair's combined BiS entries as SETS, consuming each entry at most
+-- once. Counting the two slots independently through IsItemBis would award 2/2 to
+-- a player wearing two copies of the same non-unique BiS ring.
+local function CountBisForPair(tierData, char, slotA, slotB)
+    if not tierData then return 0 end
+
+    local pool = {}
+    for _, key in ipairs({ slotA, slotB }) do
+        local names = BisNamesForSlot(tierData, key)
+        if names then
+            for _, n in ipairs(names) do pool[#pool + 1] = n end
+        end
+    end
+
+    local credited = 0
+    for _, key in ipairs({ slotA, slotB }) do
+        local worn = char["gearname_"..key] or ""
+        if worn ~= "" then
+            for i, n in ipairs(pool) do
+                if n == worn then
+                    table.remove(pool, i)
+                    credited = credited + 1
+                    break
+                end
+            end
+        end
+    end
+    return credited
+end
+
+-- Slots handled by CountBisForPair rather than one at a time.
+local PAIRED_SLOTS = { ring1=true, ring2=true, trinket1=true, trinket2=true }
+
 -- Internal helper: count BiS items for an explicit spec override
 local function CountBisForSpec(char, specOverride)
     local count = 0
     for _, slotKey in ipairs(ALL_GEAR_KEYS) do
-        local itemName = char["gearname_"..slotKey] or ""
-        if IsItemBis(char.class, specOverride, slotKey, itemName) then
-            count = count + 1
+        if not PAIRED_SLOTS[slotKey] then
+            local itemName = char["gearname_"..slotKey] or ""
+            if IsItemBis(char.class, specOverride, slotKey, itemName) then
+                count = count + 1
+            end
         end
     end
+
+    local tierData = BisTierData(char.class, specOverride)
+    count = count + CountBisForPair(tierData, char, "ring1", "ring2")
+    count = count + CountBisForPair(tierData, char, "trinket1", "trinket2")
     -- 2H bonus
     local colorCount = count
     local ohIlvl = char.gear_offhand or 0
@@ -252,23 +389,19 @@ local function CountBisItems(char)
         return catCount, catRatio
     end
 
-    -- All other specs: standard path
-    local count = 0
-    for _, slotKey in ipairs(ALL_GEAR_KEYS) do
-        local itemName = char["gearname_"..slotKey] or ""
-        if IsItemBis(char.class, char.spec, slotKey, itemName) then
-            count = count + 1
-        end
-    end
-    local colorCount = count
-    local ohIlvl = char.gear_offhand or 0
-    local mhName = char.gearname_mainhand or ""
-    if ohIlvl == 0 and IsItemBis(char.class, char.spec, "mainhand", mhName) then
-        colorCount = colorCount + 1
-    end
-    local ratio = colorCount / MAX_GEAR_SLOTS
-    return count, math.min(ratio, 1.0)
+    -- All other specs: the same scoring, just against the character's own spec.
+    -- This used to be a second, near-identical copy of CountBisForSpec's body,
+    -- which meant fixes to the scoring only reached the Feral Combat branch.
+    return CountBisForSpec(char, char.spec)
 end
+
+-- Test seam (matches the AltTracker._test convention in Core.lua): the scoring
+-- functions stay local so the row renderer remains a closed unit, but the BiS
+-- suite needs to exercise slot pairing directly.
+AltTracker._test = AltTracker._test or {}
+AltTracker._test.CountBisItems  = CountBisItems
+AltTracker._test.IsItemBis      = IsItemBis
+AltTracker._test.GetBisItemName = GetBisItemName
 
 ------------------------------------------------------------
 -- BiS count gradient: grey (0) → white → green → orange
@@ -372,15 +505,20 @@ end
 -- current raid tier ceiling so each phase's gear is visually
 -- distinct.
 --
--- Update ILVL_CEILING each phase — the purple sub-gradient
+-- The ceiling tracks the selected phase — the purple sub-gradient
 -- rescales automatically.  Orange is reserved for legendary
 -- item quality in gear slots only (see FormatGearIlvl).
 ------------------------------------------------------------
 
--- *** TUNE THIS VALUE EACH PHASE ***
--- Set to the highest epic ilvl available in the current tier.
--- T4 = 125, T5 = 141, T6 = 154, Sunwell = 164
-local ILVL_CEILING = 141
+-- The ceiling follows the phase selected in Options ▸ Best in Slot, so
+-- the purple sub-gradient rescales automatically when the phase changes.
+local function IlvlCeiling()
+    local tier = AltTracker.GetBisTier()
+    for _, t in ipairs(AltTracker.BIS_TIERS) do
+        if t.key == tier then return t.ceiling end
+    end
+    return 154
+end
 
 -- Fixed breakpoints for the quality colour ramp
 local ILVL_POOR     = 60   -- below: grey
@@ -408,13 +546,27 @@ local function IlvlToColor(ilvl)
     local PURPLE_LOW  = { r=0.47, g=0.20, b=0.73 }  -- #7833BA muted blue-purple
     local PURPLE_HIGH = { r=0.78, g=0.30, b=1.00 }  -- #C74DFF vivid rich purple
 
-    if     ilvl >= ILVL_CEILING then return PURPLE_HIGH
-    elseif ilvl >= ILVL_EPIC    then return LerpColor(PURPLE_LOW, PURPLE_HIGH, (ilvl - ILVL_EPIC) / (ILVL_CEILING - ILVL_EPIC))
-    elseif ilvl >= ILVL_RARE    then return LerpColor(BLUE,       PURPLE_LOW,  (ilvl - ILVL_RARE) / (ILVL_EPIC - ILVL_RARE))
-    elseif ilvl >= ILVL_UNCOMMON then return LerpColor(GREEN,      BLUE,        (ilvl - ILVL_UNCOMMON) / (ILVL_RARE - ILVL_UNCOMMON))
-    elseif ilvl >= ILVL_COMMON  then return LerpColor(WHITE,      GREEN,       (ilvl - ILVL_COMMON) / (ILVL_UNCOMMON - ILVL_COMMON))
-    elseif ilvl >= ILVL_POOR   then return LerpColor(GREY,       WHITE,       (ilvl - ILVL_POOR) / (ILVL_COMMON - ILVL_POOR))
-    else                            return GREY
+    -- The band thresholds above are absolute, but `ceiling` is now per-phase. A low
+    -- ceiling would otherwise collapse or invert the top bands: at T4 (125) the purple
+    -- ramp has zero width, and at Pre-Raid (115) the ceiling sits *below* ILVL_EPIC, so
+    -- every blue-tier item jumps straight to vivid purple. Pull each floor down only as
+    -- far as needed to keep the bands ordered and non-empty. Phases whose ceiling is
+    -- comfortably above ILVL_EPIC (T5 and up) are unaffected and keep today's colours.
+    local ceiling = IlvlCeiling()
+    local MIN_BAND = 8
+    local epic     = math.min(ILVL_EPIC,     ceiling  - MIN_BAND)
+    local rare     = math.min(ILVL_RARE,     epic     - MIN_BAND)
+    local uncommon = math.min(ILVL_UNCOMMON, rare     - MIN_BAND)
+    local common   = math.min(ILVL_COMMON,   uncommon - MIN_BAND)
+    local poor     = math.min(ILVL_POOR,     common   - MIN_BAND)
+
+    if     ilvl >= ceiling  then return PURPLE_HIGH
+    elseif ilvl >= epic     then return LerpColor(PURPLE_LOW, PURPLE_HIGH, (ilvl - epic)     / (ceiling  - epic))
+    elseif ilvl >= rare     then return LerpColor(BLUE,       PURPLE_LOW,  (ilvl - rare)     / (epic     - rare))
+    elseif ilvl >= uncommon then return LerpColor(GREEN,      BLUE,        (ilvl - uncommon) / (rare     - uncommon))
+    elseif ilvl >= common   then return LerpColor(WHITE,      GREEN,       (ilvl - common)   / (uncommon - common))
+    elseif ilvl >= poor     then return LerpColor(GREY,       WHITE,       (ilvl - poor)     / (common   - poor))
+    else                         return GREY
     end
 end
 
@@ -613,7 +765,7 @@ function AltTracker.CreateRow(parent, height, columns)
                     GameTooltip:SetInventoryItem("player", tip.slotID)
                     if tip.bisTier then
                         GameTooltip:AddLine(" ")
-                        GameTooltip:AddLine("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:0:0:0:0:64:64:4:60:4:60|t|cff00ff00 BiS: "..tip.bisTier.."|r", 0, 1, 0)
+                        GameTooltip:AddLine("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:0:0:0:0:64:64:4:60:4:60|t|cff00ff00 BiS: "..AltTracker.GetBisTierLabel(tip.bisTier).."|r", 0, 1, 0)
                     end
                     GameTooltip:Show()
                 elseif tip.itemLink and tip.itemLink ~= "" then
@@ -628,7 +780,7 @@ function AltTracker.CreateRow(parent, height, columns)
                         GameTooltip:SetHyperlink("item:"..itemID)
                         if tip.bisTier then
                             GameTooltip:AddLine(" ")
-                            GameTooltip:AddLine("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:0:0:0:0:64:64:4:60:4:60|t|cff00ff00 BiS: "..tip.bisTier.."|r", 0, 1, 0)
+                            GameTooltip:AddLine("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:0:0:0:0:64:64:4:60:4:60|t|cff00ff00 BiS: "..AltTracker.GetBisTierLabel(tip.bisTier).."|r", 0, 1, 0)
                         end
                         GameTooltip:Show()
                     end
@@ -643,7 +795,7 @@ function AltTracker.CreateRow(parent, height, columns)
                     GameTooltip:AddLine(col.label.." — ilvl "..tip.slotIlvl, 0.8,0.8,0.8)
                     if tip.bisTier then
                         GameTooltip:AddLine(" ")
-                        GameTooltip:AddLine("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:0:0:0:0:64:64:4:60:4:60|t|cff00ff00 BiS: "..tip.bisTier.."|r", 0, 1, 0)
+                        GameTooltip:AddLine("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:0:0:0:0:64:64:4:60:4:60|t|cff00ff00 BiS: "..AltTracker.GetBisTierLabel(tip.bisTier).."|r", 0, 1, 0)
                     end
                     GameTooltip:Show()
                 end
@@ -812,7 +964,7 @@ function AltTracker.RenderRow(row, char, index, columns)
 
             -- BiS check
             local bisTier = IsItemBis(char.class, char.spec, slotKey, itemName)
-            local bisName = bisTier and nil or GetBisItemName(char.class, char.spec, slotKey)
+            local bisName = bisTier and nil or GetBisItemName(char.class, char.spec, slotKey, char)
             if row.gearTips[i] then
                 row.gearTips[i].slotIlvl         = v
                 row.gearTips[i].slotQuality       = q

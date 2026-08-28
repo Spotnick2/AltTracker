@@ -50,6 +50,11 @@ local function EnsureDefaults()
     if not AltTrackerConfig.peerWatermarks then
         AltTrackerConfig.peerWatermarks = {}
     end
+    -- Best-in-Slot phase the BiS column and gear tooltips compare against.
+    -- Existing users get T6 (the current raid tier) rather than being
+    -- silently left on whatever the old hardcoded constant was.
+    AltTrackerConfig.bisTier = AltTrackerConfig.bisTier or "T6"
+
     -- Appearance defaults
     AltTrackerConfig.theme = AltTrackerConfig.theme or "dark"
     if AltTrackerConfig.scale == nil then
