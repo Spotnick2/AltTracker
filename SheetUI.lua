@@ -2421,6 +2421,84 @@ local function CreateFrameIfNeeded()
         return cb
     end
 
+    -- ── Best in Slot section ───────────────────────────────
+    -- Picks which raid phase the BiS column and the gear-slot tooltips
+    -- compare against. Rendered as a segmented row rather than a dropdown
+    -- so every phase is visible at a glance and selecting one is a single
+    -- click, matching the Theme row's idiom above.
+    local optBisHdr = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    optBisHdr:SetPoint("TOPLEFT", P, Y)
+    optBisHdr:SetText("BEST IN SLOT")
+    optBisHdr:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+    Y = Y - 20
+
+    local optBisLabel = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    optBisLabel:SetPoint("TOPLEFT", P, Y)
+    optBisLabel:SetText("Phase")
+    optBisLabel:SetTextColor(unpack(AltTracker.C.TEXT_NORM))
+
+    local optBisBtns = {}
+    local BIS_BTN_W, BIS_BTN_H = 54, 22
+    local prevBisBtn
+    for _, tier in ipairs(AltTracker.BIS_TIERS or {}) do
+        local btn = CreateFrame("Button", nil, optionsFrame, "BackdropTemplate")
+        btn:SetSize(BIS_BTN_W, BIS_BTN_H)
+        if prevBisBtn then
+            btn:SetPoint("LEFT", prevBisBtn, "RIGHT", 6, 0)
+        else
+            btn:SetPoint("TOPLEFT", P + 60, Y + 1)
+        end
+        AltTracker.ApplyBackdrop(btn, 0.12, 0.12, 0.12, 1)
+        local lbl = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        lbl:SetAllPoints(); lbl:SetJustifyH("CENTER"); lbl:SetText(tier.label)
+        btn._key, btn._lbl = tier.key, lbl
+        optBisBtns[#optBisBtns + 1] = btn
+        prevBisBtn = btn
+    end
+
+    local function RefreshBisBtns()
+        local cur = AltTracker.GetBisTier and AltTracker.GetBisTier() or "T6"
+        local ar, ag, ab = AltTracker.GetAccentRGB()
+        for _, btn in ipairs(optBisBtns) do
+            if btn._key == cur then
+                btn:SetBackdropColor(
+                    AltTracker.C.BG_BTN_ACTIVE[1], AltTracker.C.BG_BTN_ACTIVE[2],
+                    AltTracker.C.BG_BTN_ACTIVE[3], AltTracker.C.BG_BTN_ACTIVE[4])
+                btn:SetBackdropBorderColor(ar, ag, ab, 1)
+                btn._lbl:SetTextColor(ar, ag, ab)
+            else
+                btn:SetBackdropColor(0.12, 0.12, 0.12, 1)
+                btn:SetBackdropBorderColor(0, 0, 0, 1)
+                btn._lbl:SetTextColor(unpack(AltTracker.C.TEXT_NORM))
+            end
+        end
+    end
+    for _, btn in ipairs(optBisBtns) do
+        btn:SetScript("OnClick", function(self)
+            AltTrackerConfig = AltTrackerConfig or {}
+            AltTrackerConfig.bisTier = self._key
+            RefreshBisBtns()
+            -- Re-render so the BiS column, its ratio colour and the iLvl
+            -- gradient all pick up the new phase immediately.
+            if AltTracker.RefreshSheet then AltTracker.RefreshSheet() end
+        end)
+    end
+    RefreshBisBtns()
+    AltTracker.RegisterThemeCallback(function()
+        if optionsFrame:IsShown() then RefreshBisBtns() end
+    end)
+
+    Y = Y - 26
+
+    local optBisHint = optionsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    optBisHint:SetPoint("TOPLEFT", P, Y)
+    optBisHint:SetPoint("RIGHT", optionsFrame, "RIGHT", -P, 0)
+    optBisHint:SetJustifyH("LEFT"); optBisHint:SetWordWrap(true)
+    optBisHint:SetTextColor(unpack(AltTracker.C.TEXT_DIM))
+    optBisHint:SetText("Which raid phase the BiS column and gear tooltips compare against. Also rescales the item-level colour gradient.")
+
+    Y = Y - 30
+
     -- ── Plugins section ────────────────────────────────────
     -- Recipes and Roster are LoadOnDemand addons; toggling one loads it
     -- immediately (enable) or persists the choice (disable, next /reload)

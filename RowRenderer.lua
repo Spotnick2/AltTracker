@@ -151,13 +151,46 @@ end
 
 ------------------------------------------------------------
 -- BiS lookup
--- Returns CURRENT_TIER if the item is BiS for the active tier, else nil.
--- Only the current phase's BiS list counts: previous-tier gear is no
--- longer marked, and the BiS column ratio reflects current-tier progress.
+-- Returns the active tier name if the item is BiS for it, else nil.
+-- Only the selected phase's BiS list counts: other tiers' gear is not
+-- marked, and the BiS column ratio reflects that phase's progress.
+--
+-- The phase is chosen by the user in Options ▸ Best in Slot and stored
+-- in AltTrackerConfig.bisTier; AltTracker.BIS_TIERS is the ordered list
+-- the options UI renders. Defaults to T6.
 ------------------------------------------------------------
 
--- *** TUNE THIS VALUE EACH PHASE ***
-local CURRENT_TIER = "T5"
+AltTracker.BIS_TIERS = {
+    { key = "PreRaid", label = "Pre-Raid", ceiling = 115 },
+    { key = "T4",      label = "T4",       ceiling = 125 },
+    { key = "T5",      label = "T5",       ceiling = 141 },
+    { key = "T6",      label = "T6",       ceiling = 154 },
+    { key = "ZA",      label = "ZA",       ceiling = 154 },
+    { key = "Sunwell", label = "SWP",      ceiling = 164 },
+}
+AltTracker.BIS_TIER_DEFAULT = "T6"
+
+-- Resolve the configured tier, falling back to the default if the saved
+-- value is missing or names a tier this build no longer ships.
+function AltTracker.GetBisTier()
+    local want = AltTrackerConfig and AltTrackerConfig.bisTier
+    for _, t in ipairs(AltTracker.BIS_TIERS) do
+        if t.key == want then return t.key end
+    end
+    return AltTracker.BIS_TIER_DEFAULT
+end
+
+local function CurrentTier()
+    return AltTracker.GetBisTier()
+end
+
+-- Display name for a tier key ("PreRaid" -> "Pre-Raid", "Sunwell" -> "SWP").
+function AltTracker.GetBisTierLabel(key)
+    for _, t in ipairs(AltTracker.BIS_TIERS) do
+        if t.key == key then return t.label end
+    end
+    return key
+end
 
 local function IsItemBis(class, spec, slotKey, itemName)
     if not itemName or itemName == "" then return nil end
@@ -172,15 +205,16 @@ local function IsItemBis(class, spec, slotKey, itemName)
     local specData = classData[spec]
     if not specData then return nil end
 
-    local tierData = specData[CURRENT_TIER]
+    local tier = CurrentTier()
+    local tierData = specData[tier]
     if not tierData or not tierData[slotKey] then return nil end
 
     local items = tierData[slotKey]
     if type(items) == "string" then
-        if items == itemName then return CURRENT_TIER end
+        if items == itemName then return tier end
     elseif type(items) == "table" then
         for _, bisName in ipairs(items) do
-            if bisName == itemName then return CURRENT_TIER end
+            if bisName == itemName then return tier end
         end
     end
     return nil
@@ -195,7 +229,7 @@ local function GetBisItemName(class, spec, slotKey)
     if not bisData then return nil end
     local classData = bisData[class]; if not classData then return nil end
     local specData = classData[spec]; if not specData then return nil end
-    local tierData = specData[CURRENT_TIER]; if not tierData then return nil end
+    local tierData = specData[CurrentTier()]; if not tierData then return nil end
     local items = tierData[slotKey]
     if type(items) == "string" then return items
     elseif type(items) == "table" then return items[1] end
@@ -372,15 +406,20 @@ end
 -- current raid tier ceiling so each phase's gear is visually
 -- distinct.
 --
--- Update ILVL_CEILING each phase — the purple sub-gradient
+-- The ceiling tracks the selected phase — the purple sub-gradient
 -- rescales automatically.  Orange is reserved for legendary
 -- item quality in gear slots only (see FormatGearIlvl).
 ------------------------------------------------------------
 
--- *** TUNE THIS VALUE EACH PHASE ***
--- Set to the highest epic ilvl available in the current tier.
--- T4 = 125, T5 = 141, T6 = 154, Sunwell = 164
-local ILVL_CEILING = 141
+-- The ceiling follows the phase selected in Options ▸ Best in Slot, so
+-- the purple sub-gradient rescales automatically when the phase changes.
+local function IlvlCeiling()
+    local tier = AltTracker.GetBisTier()
+    for _, t in ipairs(AltTracker.BIS_TIERS) do
+        if t.key == tier then return t.ceiling end
+    end
+    return 154
+end
 
 -- Fixed breakpoints for the quality colour ramp
 local ILVL_POOR     = 60   -- below: grey
@@ -408,8 +447,9 @@ local function IlvlToColor(ilvl)
     local PURPLE_LOW  = { r=0.47, g=0.20, b=0.73 }  -- #7833BA muted blue-purple
     local PURPLE_HIGH = { r=0.78, g=0.30, b=1.00 }  -- #C74DFF vivid rich purple
 
-    if     ilvl >= ILVL_CEILING then return PURPLE_HIGH
-    elseif ilvl >= ILVL_EPIC    then return LerpColor(PURPLE_LOW, PURPLE_HIGH, (ilvl - ILVL_EPIC) / (ILVL_CEILING - ILVL_EPIC))
+    local ceiling = IlvlCeiling()
+    if     ilvl >= ceiling   then return PURPLE_HIGH
+    elseif ilvl >= ILVL_EPIC then return LerpColor(PURPLE_LOW, PURPLE_HIGH, (ilvl - ILVL_EPIC) / (ceiling - ILVL_EPIC))
     elseif ilvl >= ILVL_RARE    then return LerpColor(BLUE,       PURPLE_LOW,  (ilvl - ILVL_RARE) / (ILVL_EPIC - ILVL_RARE))
     elseif ilvl >= ILVL_UNCOMMON then return LerpColor(GREEN,      BLUE,        (ilvl - ILVL_UNCOMMON) / (ILVL_RARE - ILVL_UNCOMMON))
     elseif ilvl >= ILVL_COMMON  then return LerpColor(WHITE,      GREEN,       (ilvl - ILVL_COMMON) / (ILVL_UNCOMMON - ILVL_COMMON))
@@ -613,7 +653,7 @@ function AltTracker.CreateRow(parent, height, columns)
                     GameTooltip:SetInventoryItem("player", tip.slotID)
                     if tip.bisTier then
                         GameTooltip:AddLine(" ")
-                        GameTooltip:AddLine("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:0:0:0:0:64:64:4:60:4:60|t|cff00ff00 BiS: "..tip.bisTier.."|r", 0, 1, 0)
+                        GameTooltip:AddLine("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:0:0:0:0:64:64:4:60:4:60|t|cff00ff00 BiS: "..AltTracker.GetBisTierLabel(tip.bisTier).."|r", 0, 1, 0)
                     end
                     GameTooltip:Show()
                 elseif tip.itemLink and tip.itemLink ~= "" then
@@ -628,7 +668,7 @@ function AltTracker.CreateRow(parent, height, columns)
                         GameTooltip:SetHyperlink("item:"..itemID)
                         if tip.bisTier then
                             GameTooltip:AddLine(" ")
-                            GameTooltip:AddLine("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:0:0:0:0:64:64:4:60:4:60|t|cff00ff00 BiS: "..tip.bisTier.."|r", 0, 1, 0)
+                            GameTooltip:AddLine("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:0:0:0:0:64:64:4:60:4:60|t|cff00ff00 BiS: "..AltTracker.GetBisTierLabel(tip.bisTier).."|r", 0, 1, 0)
                         end
                         GameTooltip:Show()
                     end
@@ -643,7 +683,7 @@ function AltTracker.CreateRow(parent, height, columns)
                     GameTooltip:AddLine(col.label.." — ilvl "..tip.slotIlvl, 0.8,0.8,0.8)
                     if tip.bisTier then
                         GameTooltip:AddLine(" ")
-                        GameTooltip:AddLine("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:0:0:0:0:64:64:4:60:4:60|t|cff00ff00 BiS: "..tip.bisTier.."|r", 0, 1, 0)
+                        GameTooltip:AddLine("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:0:0:0:0:64:64:4:60:4:60|t|cff00ff00 BiS: "..AltTracker.GetBisTierLabel(tip.bisTier).."|r", 0, 1, 0)
                     end
                     GameTooltip:Show()
                 end
