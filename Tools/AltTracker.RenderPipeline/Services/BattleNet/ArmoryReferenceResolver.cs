@@ -123,15 +123,26 @@ public sealed class ArmoryReferenceResolver : IDisposable
         var cached = await _cache.FetchAsync(cacheId, media.MainRawUrl).ConfigureAwait(false);
         if (cached is null) return null;
 
-        // The preprocessing settings are part of the prepared file's identity. Keying only on the
-        // render would mean a change to background/padding/threshold/target size never took effect:
-        // an unchanged (304) download would keep serving the old prepared PNG forever, and because
-        // its fingerprint feeds the render signature, nothing downstream would notice either.
+        // The prepared file's identity covers BOTH the preprocessing settings and the render's
+        // content hash.
+        //
+        // Settings, because keying only on the render would mean a change to
+        // background/padding/threshold/target size never took effect: an unchanged (304) download
+        // would keep serving the old prepared PNG forever, and its fingerprint feeds the render
+        // signature, so nothing downstream would notice either.
+        //
+        // Content hash, because the cache metadata is persisted at download time, before this
+        // preparation runs. If a changed render downloads but preprocessing then fails, the next
+        // run revalidates to 304 (the stored ETag already matches the new bytes) so Changed is
+        // false - and with a settings-only name the stale prepared file still exists, so
+        // preparation is skipped and the new render is silently lost for good. Naming the file
+        // after the content it was built from makes that failure retry instead.
+        var contentTag = string.IsNullOrEmpty(cached.ContentHash) ? "nohash" : cached.ContentHash[..8];
+        var cacheDirectory = Path.GetDirectoryName(_cache.RenderPathFor(cacheId))!;
         var preparedPath = Path.Combine(
-            Path.GetDirectoryName(_cache.RenderPathFor(cacheId))!,
-            $"{cacheId}-reference-{PreprocessingTag()}.png");
+            cacheDirectory, $"{cacheId}-reference-{PreprocessingTag()}-{contentTag}.png");
 
-        // Re-prepare when the render changed or this settings variant has not been built yet.
+        // Re-prepare when the render changed or this exact variant has not been built yet.
         if (cached.Changed || !File.Exists(preparedPath))
         {
             var prepared = ReferenceImagePreprocessor.TryPrepare(
@@ -145,6 +156,15 @@ public sealed class ArmoryReferenceResolver : IDisposable
                 _logger);
 
             if (!prepared) return null;
+
+            // Drop superseded variants for this character so the cache does not grow a file per
+            // render revision and settings permutation.
+            foreach (var stale in Directory.EnumerateFiles(cacheDirectory, $"{cacheId}-reference-*.png"))
+            {
+                if (string.Equals(stale, preparedPath, StringComparison.OrdinalIgnoreCase)) continue;
+                try { File.Delete(stale); }
+                catch (Exception ex) { _logger.Verbose($"[BattleNet] Could not remove {stale}: {ex.Message}"); }
+            }
         }
 
         return new ArmoryReference(

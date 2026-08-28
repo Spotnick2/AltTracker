@@ -47,7 +47,8 @@ try
         logger.Info(options.DryRun
             ? "[BattleNet] Checking the armory for updated renders (read-only preview; nothing will be generated)..."
             : "[BattleNet] Checking the armory for updated character renders...");
-        armoryUpdatedKeys = armory.FindChangedCharacters(characters, new HeroShotStateStore(config.TempPath));
+        var preflightCharacters = characters.Where(c => RenderPlanner.MatchesFilter(c, options)).ToList();
+        armoryUpdatedKeys = armory.FindChangedCharacters(preflightCharacters, new HeroShotStateStore(config.TempPath));
         logger.Info($"[BattleNet] Characters with an updated render: {armoryUpdatedKeys.Count}");
     }
 
