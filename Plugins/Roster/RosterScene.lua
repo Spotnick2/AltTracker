@@ -68,6 +68,8 @@ local CAROUSEL_SHRINK    = 0.74   -- each step out from center scales by this
 local CAROUSEL_STEP_FRAC = 0.15   -- base horizontal step as a fraction of scene width
 local CAROUSEL_MINSCALE  = 0.42   -- floor on the perspective shrink
 local CAROUSEL_DIM_STEP  = 0.16   -- brightness lost per step out from center
+local CAROUSEL_RISE_STEP = 7      -- px each step out sits higher (ground-plane perspective)
+local CAROUSEL_EDGE_FADE = 0.25   -- alpha of the outermost slot, so the wrap is not a pop
 
 -- framed-card fallback layout (Phase A)
 local CARD_MAX_W  = 160
@@ -88,6 +90,29 @@ end
 local function ClassRGB(classToken)
     if AltTracker.GetClassRGB then return AltTracker.GetClassRGB(classToken) end
     return 0.8, 0.8, 0.8
+end
+
+-- Slot for each camp index: 0 is the centre, negatives left, positives right.
+--
+-- The slot is the signed CIRCULAR distance from the selection, so advancing the selection by one
+-- shifts every card by exactly one slot and the whole rank slides. Assigning slots by iteration
+-- order instead (+1,-1,+2,-2,... down the camp) only ever swaps the selected card with whoever
+-- held its target slot and leaves the rest frozen -- which reads as two figures trading places,
+-- not as a carousel turning. Exactly one card wraps end-to-end per step; the caller snaps and
+-- fades that one rather than sliding it back across the whole scene.
+local function CarouselSlots(n, sIdx)
+    local slotOf = {}
+    local half = math.floor(n / 2)
+    for i = 1, n do
+        local d = i - sIdx
+        if d > half then
+            d = d - n
+        elseif d < -(n - half - 1) then
+            d = d + n
+        end
+        slotOf[i] = d
+    end
+    return slotOf
 end
 
 -- Aspect-fill ("cover") texcoords: crop the overflowing axis, keep the image centered.
@@ -266,6 +291,8 @@ local function ReleaseCards(fromIndex)
     for i = fromIndex, #cards do
         cards[i].char = nil
         cards[i]._carousel = false
+        cards[i]._slot = nil
+        cards[i]:SetAlpha(1)
         cards[i]._c = nil
         cards[i]:EnableMouse(false)
         cards[i]:Hide()
@@ -293,14 +320,23 @@ local function ApplyCardGeom(card)
     local w = math.max(1, h * (card.aspect or 0.57))
     card:SetSize(w, h)
     card:ClearAllPoints()
-    card:SetPoint("BOTTOM", root, "BOTTOMLEFT", c.x, SCENE_NAME_BAND + SCENE_FLOOR_INSET)
+    -- Feet rise with distance so the rank reads as standing on a receding ground plane rather
+    -- than a flat row.
+    card:SetPoint("BOTTOM", root, "BOTTOMLEFT", c.x, SCENE_NAME_BAND + SCENE_FLOOR_INSET + (c.y or 0))
+    card:SetAlpha(c.a or 1)
+    -- Stacking follows the ANIMATED height, not the target slot. Snapping it at the start of a
+    -- turn makes cards pop in front of each other mid-slide; derived from height, the crossover
+    -- happens exactly when one figure actually passes in front of another.
+    if card._baseLevel then
+        card:SetFrameLevel(card._baseLevel + math.min(200, math.floor(h / 6)))
+    end
     if card.portrait then card.portrait:SetVertexColor(c.b, c.b, c.b) end
 end
 
 -- Binds the cutout texture + name and sets the geometry TARGET (x / height / brightness)
 -- the animator eases the card toward. Stacking `level` snaps immediately; a brand-new
 -- card snaps straight to its target (no fly-in on first open).
-local function BindCutoutTarget(card, char, isSelected, xCenter, targetH, brightness, level, minNameW)
+local function BindCutoutTarget(card, char, isSelected, xCenter, targetH, brightness, level, minNameW, slot, yRise, alpha)
     card.char = char
     card._carousel = true
     card:EnableMouse(true)
@@ -322,7 +358,6 @@ local function BindCutoutTarget(card, char, isSelected, xCenter, targetH, bright
     LoadTexture(card.portrait, cutPath)
     card.portrait:Show()
 
-    card:SetFrameLevel(level)
 
     -- name follows the card (anchored to its bottom edge, so it moves with the animation)
     card.name:ClearAllPoints()
@@ -341,10 +376,18 @@ local function BindCutoutTarget(card, char, isSelected, xCenter, targetH, bright
 
     card._t = card._t or {}
     card._t.x, card._t.h, card._t.b = xCenter, targetH, brightness
+    card._t.y, card._t.a = yRise or 0, alpha or 1
     card._settled = false
     if not card._c then
-        card._c = { x = xCenter, h = targetH, b = brightness }  -- new card: snap
+        card._c = { x = xCenter, h = targetH, b = brightness, y = yRise or 0, a = alpha or 1 }
+    elseif card._slot and slot and math.abs(slot - card._slot) > 1 then
+        -- This is the card that wrapped from one end of the rank to the other. Sliding it back
+        -- across the whole scene would read as a card flying the wrong way against the turn, so
+        -- it is teleported to its new end and faded in instead.
+        card._c.x, card._c.y, card._c.h, card._c.b = xCenter, yRise or 0, targetH, brightness
+        card._c.a = 0
     end
+    card._slot = slot
     ApplyCardGeom(card)
     card:Show()
 end
@@ -356,6 +399,11 @@ local function BindCard(card, char, selected, cardW, cardH, x, y)
     card.char = char
     card._carousel = false
     card._c = nil   -- drop any carousel tween state
+    -- Undo carousel-only state: an outer-slot card sits at CAROUSEL_EDGE_FADE, and without this
+    -- it would stay translucent as a framed card. _slot must clear too, or re-entering carousel
+    -- mode would compare against a stale slot and mistake it for a wrap.
+    card._slot = nil
+    card:SetAlpha(1)
     card:EnableMouse(true)
 
     card:ClearAllPoints()
@@ -610,9 +658,12 @@ function RosterScene.Build(parent, callbacks)
             local card = cards[i]
             if card._carousel and card._c and card._t and card:IsShown() then
                 local c, t = card._c, card._t
-                if math.abs(t.x - c.x) < 0.3 and math.abs(t.h - c.h) < 0.3 and math.abs(t.b - c.b) < 0.004 then
+                if math.abs(t.x - c.x) < 0.3 and math.abs(t.h - c.h) < 0.3
+                   and math.abs(t.b - c.b) < 0.004 and math.abs((t.y or 0) - (c.y or 0)) < 0.3
+                   and math.abs((t.a or 1) - (c.a or 1)) < 0.004 then
                     if not card._settled then
                         c.x, c.h, c.b = t.x, t.h, t.b
+                        c.y, c.a = t.y or 0, t.a or 1
                         ApplyCardGeom(card)
                         card._settled = true
                     end
@@ -620,6 +671,8 @@ function RosterScene.Build(parent, callbacks)
                     c.x = c.x + (t.x - c.x) * k
                     c.h = c.h + (t.h - c.h) * k
                     c.b = c.b + (t.b - c.b) * k
+                    c.y = (c.y or 0) + ((t.y or 0) - (c.y or 0)) * k
+                    c.a = (c.a or 1) + ((t.a or 1) - (c.a or 1)) * k
                     ApplyCardGeom(card)
                     card._settled = false
                 end
@@ -686,14 +739,7 @@ function RosterScene.Render(camp, selectedGuid)
             if camp[i].guid == selectedGuid then sIdx = i; break end
         end
 
-        -- slot k per camp index: selected = 0, the rest fan out +1,-1,+2,-2,...
-        local slotOf = {}
-        slotOf[sIdx] = 0
-        local seq, si = {}, 1
-        for d = 1, n do seq[#seq + 1] = d; seq[#seq + 1] = -d end
-        for i = 1, n do
-            if i ~= sIdx then slotOf[i] = seq[si]; si = si + 1 end
-        end
+        local slotOf = CarouselSlots(n, sIdx)
 
         for i = 1, n do
             local card = EnsureCard(i)
@@ -706,7 +752,13 @@ function RosterScene.Render(camp, selectedGuid)
             local x = (k >= 0) and (centerX + off) or (centerX - off)
             local brightness = math.max(0.5, 1 - CAROUSEL_DIM_STEP * ak)
             local level = card._baseLevel + (n - ak)
-            BindCutoutTarget(card, char, char.guid == selectedGuid, x, baseH * scale, brightness, level, minNameW)
+            local rise = ak * CAROUSEL_RISE_STEP
+            -- Only the outermost slot is faded: it is the one that wraps, and fading just that
+            -- one hides the teleport without dimming the whole rank.
+            local maxSlot = math.floor(n / 2)
+            local alpha = (ak >= maxSlot and n > 2) and CAROUSEL_EDGE_FADE or 1
+            BindCutoutTarget(card, char, char.guid == selectedGuid, x, baseH * scale, brightness,
+                             level, minNameW, k, rise, alpha)
         end
         if root.arrowPrev then
             if n > 1 then root.arrowPrev:Show(); root.arrowNext:Show()
@@ -744,6 +796,7 @@ end
 
 -- Test seam (harmless in-game): expose pure internals for tests/test_scene.lua.
 RosterScene._test = {
+    CarouselSlots = CarouselSlots,
     CoverTexCoord = CoverTexCoord,
     SelectCamp    = RosterScene.SelectCamp,
 }

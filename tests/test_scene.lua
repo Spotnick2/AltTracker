@@ -4,6 +4,7 @@
 -- Covers the frame-free helpers exposed on AltTracker.RosterScene._test:
 --   * SelectCamp    — filter + top-N-by-level/iLvl camp selection
 --   * CoverTexCoord — aspect-fill ("cover") texcoord math
+--   * CarouselSlots — hero-carousel slot assignment (what makes it turn)
 --
 -- The module creates no frames at load time, so it loads cleanly under the stubs.
 -- Run from the repo root with the Lua 5.1 interpreter:
@@ -16,7 +17,7 @@ AltTracker = {}
 assert(loadfile("Plugins/Roster/RosterScene.lua"))()
 
 local S = AltTracker.RosterScene._test
-assert(S and S.SelectCamp and S.CoverTexCoord, "test seam not exposed")
+assert(S and S.SelectCamp and S.CoverTexCoord and S.CarouselSlots, "test seam not exposed")
 
 ------------------------------------------------------------
 -- Tiny assert harness (ParseBuddy style)
@@ -132,6 +133,53 @@ end
 do
     local u1, u2, v1, v2 = S.CoverTexCoord(0, 0, 0, 0)
     check(u1 >= 0 and u2 <= 1 and v1 >= 0 and v2 <= 1, "degenerate dims stay within [0,1]")
+end
+
+------------------------------------------------------------
+-- CarouselSlots — the carousel must TURN, not reshuffle.
+--
+-- Slots are the signed circular distance to the selection, so advancing shifts
+-- every card by exactly one slot. The previous fan-out-by-iteration-order
+-- assignment moved only two cards and left the rest frozen, which reads as two
+-- figures swapping places rather than a rank rotating.
+------------------------------------------------------------
+
+local function slotList(n, sIdx)
+    local out = {}
+    local s = S.CarouselSlots(n, sIdx)
+    for i = 1, n do out[i] = s[i] end
+    return out
+end
+
+for n = 1, 8 do
+    for sIdx = 1, n do
+        eq(S.CarouselSlots(n, sIdx)[sIdx], 0,
+           "selected character should hold slot 0 (n=" .. n .. ", sel=" .. sIdx .. ")")
+
+        local seen, dup = {}, false
+        for _, k in ipairs(slotList(n, sIdx)) do
+            if seen[k] then dup = true end
+            seen[k] = true
+        end
+        check(not dup, "slots must be unique (n=" .. n .. ", sel=" .. sIdx .. ")")
+    end
+end
+
+-- THE regression: advancing the selection slides every card one slot, except the
+-- single card that wraps from one end of the rank to the other.
+for n = 2, 8 do
+    for sIdx = 1, n do
+        local nextIdx = (sIdx % n) + 1
+        local before, after = S.CarouselSlots(n, sIdx), S.CarouselSlots(n, nextIdx)
+        local shifted, wrapped = 0, 0
+        for i = 1, n do
+            if after[i] - before[i] == -1 then shifted = shifted + 1 else wrapped = wrapped + 1 end
+        end
+        eq(shifted, n - 1,
+           "advancing should slide n-1 cards one slot (n=" .. n .. ", sel=" .. sIdx .. ")")
+        eq(wrapped, 1,
+           "exactly one card should wrap end-to-end (n=" .. n .. ", sel=" .. sIdx .. ")")
+    end
 end
 
 ------------------------------------------------------------
