@@ -115,6 +115,20 @@ local function CarouselSlots(n, sIdx)
     return slotOf
 end
 
+-- Signed circular distance from one camp index to another, in the same wrapping convention as
+-- CarouselSlots. This is how far the rank turns for a given selection change: one for an arrow
+-- press, more when a character is clicked directly in the list.
+local function CircularStep(n, fromIdx, toIdx)
+    local half = math.floor(n / 2)
+    local d = toIdx - fromIdx
+    if d > half then
+        d = d - n
+    elseif d < -(n - half - 1) then
+        d = d + n
+    end
+    return d
+end
+
 -- Aspect-fill ("cover") texcoords: crop the overflowing axis, keep the image centered.
 -- Used only by the framed-card fallback.
 local function CoverTexCoord(fw, fh, sw, sh)
@@ -334,9 +348,14 @@ local function ApplyCardGeom(card)
 end
 
 -- Binds the cutout texture + name and sets the geometry TARGET (x / height / brightness)
--- the animator eases the card toward. Stacking `level` snaps immediately; a brand-new
--- card snaps straight to its target (no fly-in on first open).
-local function BindCutoutTarget(card, char, isSelected, xCenter, targetH, brightness, level, minNameW, slot, yRise, alpha)
+-- the animator eases the card toward. A brand-new card snaps straight to its target (no fly-in on
+-- first open).
+--
+-- `expectedDelta` is how far EVERY sliding card moves this turn (-step). A card whose slot moved by
+-- something else is the one that crossed the seam. Testing "moved more than one slot" instead only
+-- holds for arrow presses: clicking a character in the list moves the whole rank several slots at
+-- once, and every card would be mistaken for a wrap and teleport.
+local function BindCutoutTarget(card, char, isSelected, xCenter, targetH, brightness, level, minNameW, slot, yRise, alpha, expectedDelta)
     card.char = char
     card._carousel = true
     card:EnableMouse(true)
@@ -380,7 +399,7 @@ local function BindCutoutTarget(card, char, isSelected, xCenter, targetH, bright
     card._settled = false
     if not card._c then
         card._c = { x = xCenter, h = targetH, b = brightness, y = yRise or 0, a = alpha or 1 }
-    elseif card._slot and slot and math.abs(slot - card._slot) > 1 then
+    elseif card._slot and slot and expectedDelta and (slot - card._slot) ~= expectedDelta then
         -- This is the card that wrapped from one end of the rank to the other. Sliding it back
         -- across the whole scene would read as a card flying the wrong way against the turn, so
         -- it is teleported to its new end and faded in instead.
@@ -710,6 +729,7 @@ end
 
 function RosterScene.Render(camp, selectedGuid)
     if not root then return end
+    local prevSelected = lastSelected
     lastCamp, lastSelected = camp, selectedGuid
 
     local rW = math.max(1, root:GetWidth())
@@ -741,6 +761,21 @@ function RosterScene.Render(camp, selectedGuid)
 
         local slotOf = CarouselSlots(n, sIdx)
 
+        -- How far the rank turns this render, and therefore how far each sliding card moves.
+        -- Left nil when the previous selection is not in this camp (the camp itself changed), in
+        -- which case nothing is treated as a wrap and every card simply slides to its new slot.
+        local expectedDelta
+        if prevSelected == selectedGuid then
+            expectedDelta = 0
+        elseif prevSelected then
+            for i = 1, n do
+                if camp[i].guid == prevSelected then
+                    expectedDelta = -CircularStep(n, i, sIdx)
+                    break
+                end
+            end
+        end
+
         for i = 1, n do
             local card = EnsureCard(i)
             local char = camp[i]
@@ -758,7 +793,7 @@ function RosterScene.Render(camp, selectedGuid)
             local maxSlot = math.floor(n / 2)
             local alpha = (ak >= maxSlot and n > 2) and CAROUSEL_EDGE_FADE or 1
             BindCutoutTarget(card, char, char.guid == selectedGuid, x, baseH * scale, brightness,
-                             level, minNameW, k, rise, alpha)
+                             level, minNameW, k, rise, alpha, expectedDelta)
         end
         if root.arrowPrev then
             if n > 1 then root.arrowPrev:Show(); root.arrowNext:Show()
@@ -797,6 +832,7 @@ end
 -- Test seam (harmless in-game): expose pure internals for tests/test_scene.lua.
 RosterScene._test = {
     CarouselSlots = CarouselSlots,
+    CircularStep  = CircularStep,
     CoverTexCoord = CoverTexCoord,
     SelectCamp    = RosterScene.SelectCamp,
 }
