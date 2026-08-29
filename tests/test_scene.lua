@@ -4,6 +4,8 @@
 -- Covers the frame-free helpers exposed on AltTracker.RosterScene._test:
 --   * SelectCamp    — filter + top-N-by-level/iLvl camp selection
 --   * CoverTexCoord — aspect-fill ("cover") texcoord math
+--   * CarouselSlots — hero-carousel slot assignment (what makes it turn)
+--   * CircularStep  — how far the rank turns, incl. non-adjacent selection clicks
 --
 -- The module creates no frames at load time, so it loads cleanly under the stubs.
 -- Run from the repo root with the Lua 5.1 interpreter:
@@ -16,7 +18,8 @@ AltTracker = {}
 assert(loadfile("Plugins/Roster/RosterScene.lua"))()
 
 local S = AltTracker.RosterScene._test
-assert(S and S.SelectCamp and S.CoverTexCoord, "test seam not exposed")
+assert(S and S.SelectCamp and S.CoverTexCoord and S.CarouselSlots and S.CircularStep,
+       "test seam not exposed")
 
 ------------------------------------------------------------
 -- Tiny assert harness (ParseBuddy style)
@@ -132,6 +135,112 @@ end
 do
     local u1, u2, v1, v2 = S.CoverTexCoord(0, 0, 0, 0)
     check(u1 >= 0 and u2 <= 1 and v1 >= 0 and v2 <= 1, "degenerate dims stay within [0,1]")
+end
+
+------------------------------------------------------------
+-- CarouselSlots — the carousel must TURN, not reshuffle.
+--
+-- Slots are the signed circular distance to the selection, so advancing shifts
+-- every card by exactly one slot. The previous fan-out-by-iteration-order
+-- assignment moved only two cards and left the rest frozen, which reads as two
+-- figures swapping places rather than a rank rotating.
+------------------------------------------------------------
+
+local function slotList(n, sIdx)
+    local out = {}
+    local s = S.CarouselSlots(n, sIdx)
+    for i = 1, n do out[i] = s[i] end
+    return out
+end
+
+for n = 1, 8 do
+    for sIdx = 1, n do
+        eq(S.CarouselSlots(n, sIdx)[sIdx], 0,
+           "selected character should hold slot 0 (n=" .. n .. ", sel=" .. sIdx .. ")")
+
+        local seen, dup = {}, false
+        for _, k in ipairs(slotList(n, sIdx)) do
+            if seen[k] then dup = true end
+            seen[k] = true
+        end
+        check(not dup, "slots must be unique (n=" .. n .. ", sel=" .. sIdx .. ")")
+    end
+end
+
+-- THE regression: advancing the selection slides every card one slot, except the
+-- single card that wraps from one end of the rank to the other.
+for n = 2, 8 do
+    for sIdx = 1, n do
+        local nextIdx = (sIdx % n) + 1
+        local before, after = S.CarouselSlots(n, sIdx), S.CarouselSlots(n, nextIdx)
+        local shifted, wrapped = 0, 0
+        for i = 1, n do
+            if after[i] - before[i] == -1 then shifted = shifted + 1 else wrapped = wrapped + 1 end
+        end
+        eq(shifted, n - 1,
+           "advancing should slide n-1 cards one slot (n=" .. n .. ", sel=" .. sIdx .. ")")
+        eq(wrapped, 1,
+           "exactly one card should wrap end-to-end (n=" .. n .. ", sel=" .. sIdx .. ")")
+    end
+end
+
+------------------------------------------------------------
+-- Non-adjacent selection: clicking a character in the list turns the rank by
+-- more than one slot. Only the cards that actually cross the seam may teleport.
+--
+-- The first version tested "moved more than one slot", which is true of EVERY
+-- card once the rank turns by two or more — so clicking a character made the
+-- whole scene pop instead of rotating.
+------------------------------------------------------------
+
+for n = 2, 8 do
+    for from = 1, n do
+        for to = 1, n do
+            if from ~= to then
+                local before, after = S.CarouselSlots(n, from), S.CarouselSlots(n, to)
+                local step = S.CircularStep(n, from, to)
+                local expected = -step
+                local slid, wrapped = 0, 0
+                for i = 1, n do
+                    if after[i] - before[i] == expected then slid = slid + 1
+                    else wrapped = wrapped + 1 end
+                end
+
+                local label = "(n=" .. n .. ", " .. from .. "->" .. to .. ")"
+                -- Every card either slides by exactly the turn amount or crosses the seam.
+                eq(slid + wrapped, n, "each card must slide or wrap " .. label)
+                -- Only as many cards cross the seam as the rank turned slots.
+                eq(wrapped, math.abs(step), "wrap count must equal the turn size " .. label)
+                -- The rank must never teleport wholesale: something always slides.
+                check(slid > 0 or math.abs(step) == n, "at least one card must slide " .. label)
+            end
+        end
+    end
+end
+
+-- CircularStep takes the short way round and is antisymmetric.
+for n = 2, 8 do
+    for from = 1, n do
+        for to = 1, n do
+            local d = S.CircularStep(n, from, to)
+            check(math.abs(d) <= n / 2 + 0.5, "step should take the short way (n=" .. n .. ")")
+            if from ~= to then
+                check(d ~= 0, "distinct selections must differ (n=" .. n .. ")")
+            else
+                eq(d, 0, "same selection means no turn (n=" .. n .. ")")
+            end
+        end
+    end
+end
+
+-- A re-render with the selection unchanged must move nothing at all.
+for n = 1, 8 do
+    for sIdx = 1, n do
+        local a, b = S.CarouselSlots(n, sIdx), S.CarouselSlots(n, sIdx)
+        for i = 1, n do
+            eq(b[i] - a[i], 0, "a re-render must not shift any card (n=" .. n .. ")")
+        end
+    end
 end
 
 ------------------------------------------------------------
