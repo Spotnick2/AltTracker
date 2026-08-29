@@ -6,14 +6,20 @@ Phase B of the Midnight-style scene. This is a deliberately SEPARATE, decoupled 
 .NET render pipeline: it does NOT touch that pipeline's manifest, gear hashes or state, so the
 List-view heroshot portraits are never modified.
 
-Cutouts come from one of two sources, in order:
+Cutouts come from two possible sources, tried in an order set by --source:
 
-  1. The cached Battle.net armory render, when the pipeline has downloaded one. It is already a
-     transparent PNG of exactly this character's gear, so the cutout is just an alpha-bbox trim —
-     pixel-perfect edges, no segmentation model, no guesswork.
-  2. Otherwise the opaque 512x896 AI hero shot, cut out with a segmentation model
-     (rembg / isnet-general-use). The model is loaded lazily, so a run fully covered by armory
-     renders never pays for it.
+  * ai (default) — the opaque 512x896 AI hero shot, cut out with a segmentation model
+    (rembg / isnet-general-use). This matches the painted portraits the List view shows, so the
+    two views read as one set of artwork.
+  * armory — the cached Battle.net render, already a transparent PNG of exactly this character's
+    gear, so the cutout is just an alpha-bbox trim: pixel-perfect edges and no guesswork, at the
+    cost of showing the raw 2007-era model next to painted art.
+
+Whichever is preferred, the other is the fallback. A character with neither (no hero shot and, for
+anyone under level 10, no armory render) gets no manifest entry and the addon draws its framed
+card instead — and since CampHasCutouts is all-or-nothing, that drops the whole camp to cards.
+
+The segmentation model is loaded lazily, so a run that never needs it does not pay for it.
 
 Output:
   * <addon>/Media/SceneCutouts/<base>.tga   — 32-bit alpha cutout, trimmed to the character bbox
@@ -38,7 +44,10 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
-APPSETTINGS = os.path.join(HERE, "AltTracker.RenderPipeline", "appsettings.json")
+# ALTTRACKER_APPSETTINGS points the tool at a different config - used by the tests to run
+# against a sandbox tree instead of the real WoW install.
+APPSETTINGS = (os.environ.get("ALTTRACKER_APPSETTINGS")
+               or os.path.join(HERE, "AltTracker.RenderPipeline", "appsettings.json"))
 
 MANIFEST_ENTRY_RE = re.compile(r'\["(?P<key>[^"]+)"\]\s*=\s*\{(?P<body>.*?)\}', re.DOTALL)
 FIELD_RE = lambda name: re.compile(name + r'\s*=\s*"(?P<v>[^"]*)"')
@@ -63,7 +72,11 @@ def load_paths():
         "scene_dir": os.path.join(addon_root, "Media", "SceneCutouts"),
         "render_manifest": cfg["ManifestOutputPath"],
         "scene_manifest_deployed": os.path.join(addon_root, "AltTrackerSceneManifest.lua"),
-        "scene_manifest_repo": os.path.join(REPO_ROOT, "AltTrackerSceneManifest.lua"),
+        # Committed snapshot. Configurable rather than always REPO_ROOT: the path is derived from
+        # this script's location, so without an override a run pointed at a sandbox config would
+        # still write into the real repo.
+        "scene_manifest_repo": cfg.get("SceneManifestRepoPath")
+                               or os.path.join(REPO_ROOT, "AltTrackerSceneManifest.lua"),
     }
 
 
@@ -187,6 +200,10 @@ def main():
     ap.add_argument("--model", default="isnet-general-use")
     ap.add_argument("--only", default=None, help="only process base names containing this substring")
     ap.add_argument("--magick", default="magick")
+    ap.add_argument("--source", choices=("ai", "armory"), default="ai",
+                    help="cutout source: 'ai' segments the hero shot (default, matches the "
+                         "painted look of the List view); 'armory' trims the Battle.net render's "
+                         "real alpha (exact gear, but the raw in-game model)")
     args = ap.parse_args()
 
     paths = load_paths()
@@ -212,51 +229,79 @@ def main():
             session_holder["s"] = new_session(args.model)
         return session_holder["s"]
 
-    print(f"characters: {len(chars)}")
+    print(f"characters: {len(chars)}; source: {args.source}")
 
     # Start from what is already on disk so a filtered run updates its own entries instead of
     # dropping every character it did not touch.
     merged = parse_scene_manifest(paths["scene_manifest_deployed"]) \
              or parse_scene_manifest(paths["scene_manifest_repo"])
-    produced, from_armory, from_model = 0, 0, 0
+    # Preferred source first, the other as fallback: AI -> armory, or armory -> AI.
+    order = ("ai", "armory") if args.source == "ai" else ("armory", "ai")
+    produced, from_armory, from_model, removed = 0, 0, 0, 0
 
     for key, base in chars:
         base_noext = os.path.splitext(base)[0]
         out_base = base_noext + ".tga"
         out = os.path.join(paths["scene_dir"], out_base)
 
-        armory = find_armory_render(paths["armory_cache"], base_noext)
         src = os.path.join(paths["render_dir"], base)
+        armory = find_armory_render(paths["armory_cache"], base_noext)
 
-        try:
-            if armory:
-                w, h = cut_from_armory(armory, out, args.magick)
-                origin = "armory"
-                from_armory += 1
-            elif os.path.exists(src):
-                w, h = cut_one(get_session(), src, out, args.magick)
-                origin = "model"
-                from_model += 1
-            else:
-                print(f"  skip {key}: no armory render and no source portrait ({base})")
+        # Only the sources that actually have material for this character.
+        available = {}
+        if os.path.exists(src):
+            available["ai"] = lambda: cut_one(get_session(), src, out, args.magick)
+        if armory:
+            available["armory"] = lambda: cut_from_armory(armory, out, args.magick)
+
+        size = origin = None
+        for name in order:
+            produce = available.get(name)
+            if produce is None:
                 continue
-        except Exception as ex:  # noqa: BLE001 - report and keep going on the rest
-            print(f"  FAIL {key}: {ex}")
+            try:
+                size = produce()
+                origin = name
+                break
+            except Exception as ex:  # noqa: BLE001 - try the next source, then move on
+                print(f"  warn {key}: {name} source failed ({ex})")
+
+        if origin is None:
+            # Drop any entry carried over from the previous manifest. `merged` starts from what is
+            # already on disk, so leaving a stale entry here would keep pointing the addon at an old
+            # cutout file and CampHasCutouts would go on choosing cutouts instead of falling back.
+            # Only characters this run actually processed are removed; those filtered out by --only
+            # are never visited and keep their entries.
+            if merged.pop(key, None) is not None:
+                removed += 1
+            print(f"  skip {key}: no AI portrait and no armory render -> framed card")
             continue
+
+        w, h = size
+        if origin == "armory":
+            from_armory += 1
+        else:
+            from_model += 1
 
         merged[key] = (out_base, str(w), str(h))
         produced += 1
         print(f"  ok   {key} -> SceneCutouts\\{out_base} ({w}x{h}) [{origin}]")
 
-    if not produced:
+    if not produced and not removed:
         print("No cutouts produced.", file=sys.stderr)
         return 1
+
+    # A run that only REMOVED entries still has to write: those characters must stop being
+    # advertised as having cutouts, or the addon keeps loading their stale files.
+    if not produced:
+        print(f"No cutouts produced; dropping {removed} stale entr(y/ies).", file=sys.stderr)
 
     entries = [(k, v[0], v[1], v[2]) for k, v in merged.items()]
     entries.sort(key=lambda e: e[0])
     write_scene_manifest(paths["scene_manifest_deployed"], entries)
     write_scene_manifest(paths["scene_manifest_repo"], entries)
-    print(f"produced {produced} cutout(s): {from_armory} from armory, {from_model} via the model")
+    print(f"produced {produced} cutout(s): {from_model} from AI art, {from_armory} from armory renders"
+          + (f"; removed {removed} stale entr(y/ies)" if removed else ""))
     print(f"wrote scene manifest ({len(entries)} entries, {len(entries) - produced} carried over):")
     print(f"  deployed: {paths['scene_manifest_deployed']}")
     print(f"  repo:     {paths['scene_manifest_repo']}")

@@ -152,16 +152,20 @@ public sealed class HeroShotRenderAdapter : IRenderAdapter
             return;
         }
 
-        // A per-character override beats the global default, so one character can publish the raw
-        // armory render while the rest keep AI generation.
-        var providerName = cfg.CharacterProviders.TryGetValue(job.ManifestKey, out var perCharacter)
-                           && !string.IsNullOrWhiteSpace(perCharacter)
+        // A per-character override beats the global default, so one character can prefer the raw
+        // armory render while the rest prefer AI generation.
+        var preferredProvider = cfg.CharacterProviders.TryGetValue(job.ManifestKey, out var perCharacter)
+                                && !string.IsNullOrWhiteSpace(perCharacter)
             ? perCharacter
             : cfg.Provider;
-        var provider = GetProvider(providerName, cfg, providerCache, logger);
+
+        // Ordered fallback chain. Whichever source is preferred, the other is tried before giving
+        // up; if every source fails the job produces no image, and the addon draws its identity
+        // card instead. "manual" is an explicit import path, so it never chains.
+        var chain = BuildProviderChain(preferredProvider);
 
         byte[]? armoryBytes = null;
-        if (provider.ProviderId == "armory" && armory is { Available: true })
+        if (chain.Contains("armory", StringComparer.OrdinalIgnoreCase) && armory is { Available: true })
         {
             var armoryReference = armory.TryResolve(c, job.ManifestKey, job.OutputBaseName);
             if (armoryReference is not null && File.Exists(armoryReference.RawPath))
@@ -170,7 +174,9 @@ public sealed class HeroShotRenderAdapter : IRenderAdapter
             }
         }
 
-        var signature = HeroShotSignatureBuilder.Compute(c, cfg, refFingerprint, provider.ProviderId);
+        // The signature tracks what was ASKED for, not which link of the chain answered - otherwise
+        // a run that fell back would look like a configuration change on the next run and re-render.
+        var signature = HeroShotSignatureBuilder.Compute(c, cfg, refFingerprint, preferredProvider);
 
         if (!options.ForceAll)
         {
@@ -201,14 +207,55 @@ public sealed class HeroShotRenderAdapter : IRenderAdapter
             ArmoryRenderBytes = armoryBytes
         };
 
-        var response = provider.GenerateAsync(request).GetAwaiter().GetResult();
+        // Walk the chain: first provider that returns a valid image wins.
+        byte[]? imageBytes = null;
+        string? usedProvider = null;
+        var attemptErrors = new List<string>();
 
-        if (!response.Success || response.ImageBytes is null)
+        foreach (var candidate in chain)
         {
-            var err = response.Error ?? "unknown error";
-            logger.Error($"[HeroShot] Generation failed for {job.ManifestKey}: {err}");
-            errors[job.JobKey] = err;
+            var provider = GetProvider(candidate, cfg, providerCache, logger);
+            if (chain.Count > 1)
+            {
+                logger.Info($"[HeroShot] Trying provider '{provider.ProviderId}' for {job.ManifestKey}.");
+            }
 
+            var response = provider.GenerateAsync(request).GetAwaiter().GetResult();
+
+            if (!response.Success || response.ImageBytes is null)
+            {
+                var err = $"{provider.ProviderId}: {response.Error ?? "unknown error"}";
+                logger.Error($"[HeroShot] Generation failed for {job.ManifestKey} - {err}");
+                attemptErrors.Add(err);
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(response.RevisedPrompt))
+            {
+                logger.Info($"[HeroShot] Revised prompt: {response.RevisedPrompt[..Math.Min(120, response.RevisedPrompt.Length)]}...");
+            }
+
+            var validation = validator.Validate(response.ImageBytes);
+            if (!validation.IsValid)
+            {
+                var err = $"{provider.ProviderId}: quality validation failed: {validation.Reason}";
+                logger.Error($"[HeroShot] {err} for {job.ManifestKey}");
+                attemptErrors.Add(err);
+                continue;
+            }
+
+            imageBytes = response.ImageBytes;
+            usedProvider = provider.ProviderId;
+            break;
+        }
+
+        if (imageBytes is null || usedProvider is null)
+        {
+            errors[job.JobKey] = string.Join(" | ", attemptErrors);
+
+            // Retain the previous image so the portrait does not blank out. Program treats a
+            // retained source as a failure and leaves the manifest untouched, so the next run
+            // retries rather than publishing this as current.
             if (File.Exists(stagingPath))
             {
                 logger.Info($"[HeroShot] Keeping prior staging image for {job.ManifestKey}");
@@ -217,34 +264,20 @@ public sealed class HeroShotRenderAdapter : IRenderAdapter
             return;
         }
 
-        if (!string.IsNullOrWhiteSpace(response.RevisedPrompt))
+        if (!string.Equals(usedProvider, chain[0], StringComparison.OrdinalIgnoreCase))
         {
-            logger.Info($"[HeroShot] Revised prompt: {response.RevisedPrompt[..Math.Min(120, response.RevisedPrompt.Length)]}...");
+            logger.Warn($"[HeroShot] {job.ManifestKey}: '{chain[0]}' failed; fell back to '{usedProvider}'.");
         }
 
-        var validation = validator.Validate(response.ImageBytes);
-        if (!validation.IsValid)
-        {
-            var err = $"quality validation failed: {validation.Reason}";
-            logger.Error($"[HeroShot] {err} for {job.ManifestKey}");
-            errors[job.JobKey] = err;
-            if (File.Exists(stagingPath))
-            {
-                logger.Info($"[HeroShot] Keeping prior staging image for {job.ManifestKey}");
-                sources[job.JobKey] = stagingPath;
-            }
-            return;
-        }
-
-        File.WriteAllBytes(stagingPath, response.ImageBytes);
-        logger.Info($"[HeroShot] Staged: {stagingPath} ({response.ImageBytes.Length} bytes)");
+        File.WriteAllBytes(stagingPath, imageBytes);
+        logger.Info($"[HeroShot] Staged: {stagingPath} ({imageBytes.Length} bytes)");
 
         pendingStates[job.JobKey] = (job.ManifestKey, new HeroShotRenderState
         {
             ManifestKey = job.ManifestKey,
             RenderSignature = signature,
             StylePreset = cfg.Style ?? "realistic",
-            ProviderId = provider.ProviderId,
+            ProviderId = usedProvider,
             ProviderModel = cfg.Model ?? "",
             PromptTemplateVersion = cfg.PromptTemplateVersion ?? "v1",
             GenerationVersion = cfg.GenerationVersion ?? "1",
@@ -338,13 +371,38 @@ public sealed class HeroShotRenderAdapter : IRenderAdapter
         return best;
     }
 
-    private static IHeroShotRenderProvider GetProvider(
+    /// <summary>
+    /// Ordered provider chain for a character: the preferred source first, the other as fallback.
+    ///
+    /// "manual" is an explicit hand-import path rather than a generator, so it never chains -
+    /// silently substituting something else would hide the fact that the import was missing.
+    /// </summary>
+    /// <summary>
+    /// Canonical provider name. Null, empty and whitespace all mean "not configured" and resolve to
+    /// the default - a bare ?? would let "" through. Shared by the chain builder and the factory so
+    /// eager validation in Execute and per-job resolution cannot disagree.
+    /// </summary>
+    internal static string NormalizeProviderName(string? name)
+        => string.IsNullOrWhiteSpace(name) ? "codex" : name.Trim().ToLowerInvariant();
+
+    internal static IReadOnlyList<string> BuildProviderChain(string? preferred)
+    {
+        var name = NormalizeProviderName(preferred);
+        return name switch
+        {
+            "codex"  => ["codex", "armory"],
+            "armory" => ["armory", "codex"],
+            _        => [name],
+        };
+    }
+
+    internal static IHeroShotRenderProvider GetProvider(
         string? name,
         AppConfig.HeroShotConfig cfg,
         Dictionary<string, IHeroShotRenderProvider> cache,
         RunLogger logger)
     {
-        var provider = (name ?? "codex").Trim().ToLowerInvariant();
+        var provider = NormalizeProviderName(name);
         if (cache.TryGetValue(provider, out var existing)) return existing;
 
         IHeroShotRenderProvider created = provider switch
