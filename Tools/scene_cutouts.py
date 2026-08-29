@@ -38,7 +38,10 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
-APPSETTINGS = os.path.join(HERE, "AltTracker.RenderPipeline", "appsettings.json")
+# ALTTRACKER_APPSETTINGS points the tool at a different config - used by the tests to run
+# against a sandbox tree instead of the real WoW install.
+APPSETTINGS = (os.environ.get("ALTTRACKER_APPSETTINGS")
+               or os.path.join(HERE, "AltTracker.RenderPipeline", "appsettings.json"))
 
 MANIFEST_ENTRY_RE = re.compile(r'\["(?P<key>[^"]+)"\]\s*=\s*\{(?P<body>.*?)\}', re.DOTALL)
 FIELD_RE = lambda name: re.compile(name + r'\s*=\s*"(?P<v>[^"]*)"')
@@ -63,7 +66,11 @@ def load_paths():
         "scene_dir": os.path.join(addon_root, "Media", "SceneCutouts"),
         "render_manifest": cfg["ManifestOutputPath"],
         "scene_manifest_deployed": os.path.join(addon_root, "AltTrackerSceneManifest.lua"),
-        "scene_manifest_repo": os.path.join(REPO_ROOT, "AltTrackerSceneManifest.lua"),
+        # Committed snapshot. Configurable rather than always REPO_ROOT: the path is derived from
+        # this script's location, so without an override a run pointed at a sandbox config would
+        # still write into the real repo.
+        "scene_manifest_repo": cfg.get("SceneManifestRepoPath")
+                               or os.path.join(REPO_ROOT, "AltTrackerSceneManifest.lua"),
     }
 
 
@@ -224,7 +231,7 @@ def main():
              or parse_scene_manifest(paths["scene_manifest_repo"])
     # Preferred source first, the other as fallback: AI -> armory, or armory -> AI.
     order = ("ai", "armory") if args.source == "ai" else ("armory", "ai")
-    produced, from_armory, from_model = 0, 0, 0
+    produced, from_armory, from_model, removed = 0, 0, 0, 0
 
     for key, base in chars:
         base_noext = os.path.splitext(base)[0]
@@ -254,8 +261,13 @@ def main():
                 print(f"  warn {key}: {name} source failed ({ex})")
 
         if origin is None:
-            # No entry means the addon draws this character as a framed card - and because
-            # CampHasCutouts is all-or-nothing, that drops the whole camp to cards.
+            # Drop any entry carried over from the previous manifest. `merged` starts from what is
+            # already on disk, so leaving a stale entry here would keep pointing the addon at an old
+            # cutout file and CampHasCutouts would go on choosing cutouts instead of falling back.
+            # Only characters this run actually processed are removed; those filtered out by --only
+            # are never visited and keep their entries.
+            if merged.pop(key, None) is not None:
+                removed += 1
             print(f"  skip {key}: no AI portrait and no armory render -> framed card")
             continue
 
@@ -269,15 +281,21 @@ def main():
         produced += 1
         print(f"  ok   {key} -> SceneCutouts\\{out_base} ({w}x{h}) [{origin}]")
 
-    if not produced:
+    if not produced and not removed:
         print("No cutouts produced.", file=sys.stderr)
         return 1
+
+    # A run that only REMOVED entries still has to write: those characters must stop being
+    # advertised as having cutouts, or the addon keeps loading their stale files.
+    if not produced:
+        print(f"No cutouts produced; dropping {removed} stale entr(y/ies).", file=sys.stderr)
 
     entries = [(k, v[0], v[1], v[2]) for k, v in merged.items()]
     entries.sort(key=lambda e: e[0])
     write_scene_manifest(paths["scene_manifest_deployed"], entries)
     write_scene_manifest(paths["scene_manifest_repo"], entries)
-    print(f"produced {produced} cutout(s): {from_model} from AI art, {from_armory} from armory renders")
+    print(f"produced {produced} cutout(s): {from_model} from AI art, {from_armory} from armory renders"
+          + (f"; removed {removed} stale entr(y/ies)" if removed else ""))
     print(f"wrote scene manifest ({len(entries)} entries, {len(entries) - produced} carried over):")
     print(f"  deployed: {paths['scene_manifest_deployed']}")
     print(f"  repo:     {paths['scene_manifest_repo']}")

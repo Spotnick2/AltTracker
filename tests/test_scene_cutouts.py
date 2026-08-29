@@ -7,7 +7,11 @@ Run from the repo root:
 
     python tests/test_scene_cutouts.py
 """
+import io
+import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -129,6 +133,63 @@ finally:
     for name in os.listdir(cache):
         os.remove(os.path.join(cache, name))
     os.rmdir(cache)
+
+
+# ---------------------------------------------------------------------------
+# A character that loses every source must stop being advertised as having a
+# cutout, while characters excluded by --only keep theirs.
+#
+# The merged manifest starts from what is already on disk, so simply skipping a
+# failed character left its old entry in place. CampHasCutouts would then go on
+# choosing cutouts and the addon would load a stale file instead of falling back
+# to framed cards.
+# ---------------------------------------------------------------------------
+sandbox = tempfile.mkdtemp()
+try:
+    addon = os.path.join(sandbox, "AddOns", "AltTracker")
+    os.makedirs(os.path.join(addon, "Media", "CharacterRenders"))
+    os.makedirs(os.path.join(addon, "Media", "SceneCutouts"))
+    os.makedirs(os.path.join(sandbox, "temp", "blizzard"))
+
+    # Render manifest names two characters; NEITHER has a portrait or an armory render.
+    render_manifest = os.path.join(addon, "AltTrackerRenderManifest.lua")
+    sc.write_scene_manifest(render_manifest, [
+        ("Realm:1:Gone", "realm_1_gone.tga", "1", "1"),
+        ("Realm:1:Kept", "realm_1_kept.tga", "1", "1"),
+    ])
+
+    # Both already have scene entries from a previous run.
+    scene_manifest = os.path.join(addon, "AltTrackerSceneManifest.lua")
+    sc.write_scene_manifest(scene_manifest, [
+        ("Realm:1:Gone", "realm_1_gone.tga", "100", "200"),
+        ("Realm:1:Kept", "realm_1_kept.tga", "110", "210"),
+    ])
+
+    cfg = os.path.join(sandbox, "appsettings.json")
+    with open(cfg, "w", encoding="utf-8") as f:
+        json.dump({
+            "AddonMediaDirectory": os.path.join(addon, "Media", "CharacterRenders"),
+            "ManifestOutputPath": render_manifest,
+            "TempPath": os.path.join(sandbox, "temp"),
+            "BattleNet": {"CacheDirectory": os.path.join(sandbox, "temp", "blizzard")},
+            # Keep the committed-snapshot write inside the sandbox; without this the run would
+            # overwrite the real AltTrackerSceneManifest.lua in the repo.
+            "SceneManifestRepoPath": os.path.join(sandbox, "repo-snapshot.lua"),
+        }, f)
+
+    proc = subprocess.run(
+        [sys.executable, os.path.join(REPO_ROOT, "Tools", "scene_cutouts.py"), "--only", "gone"],
+        capture_output=True, text=True, cwd=REPO_ROOT,
+        env={**os.environ, "ALTTRACKER_APPSETTINGS": cfg},
+    )
+
+    after = sc.parse_scene_manifest(scene_manifest)
+    check("Realm:1:Gone" not in after,
+          f"a character with no source must lose its manifest entry (rc={proc.returncode}, {proc.stdout.strip()[-160:]})")
+    eq(after.get("Realm:1:Kept"), ("realm_1_kept.tga", "110", "210"),
+       "a character excluded by --only must keep its entry untouched")
+finally:
+    shutil.rmtree(sandbox, ignore_errors=True)
 
 
 if failures:

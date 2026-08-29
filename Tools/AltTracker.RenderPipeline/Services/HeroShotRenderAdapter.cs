@@ -377,11 +377,17 @@ public sealed class HeroShotRenderAdapter : IRenderAdapter
     /// "manual" is an explicit hand-import path rather than a generator, so it never chains -
     /// silently substituting something else would hide the fact that the import was missing.
     /// </summary>
+    /// <summary>
+    /// Canonical provider name. Null, empty and whitespace all mean "not configured" and resolve to
+    /// the default - a bare ?? would let "" through. Shared by the chain builder and the factory so
+    /// eager validation in Execute and per-job resolution cannot disagree.
+    /// </summary>
+    internal static string NormalizeProviderName(string? name)
+        => string.IsNullOrWhiteSpace(name) ? "codex" : name.Trim().ToLowerInvariant();
+
     internal static IReadOnlyList<string> BuildProviderChain(string? preferred)
     {
-        // Null, empty and whitespace all mean "not configured" - a bare ?? would let "" through
-        // and produce a chain of one unusable name.
-        var name = string.IsNullOrWhiteSpace(preferred) ? "codex" : preferred.Trim().ToLowerInvariant();
+        var name = NormalizeProviderName(preferred);
         return name switch
         {
             "codex"  => ["codex", "armory"],
@@ -390,13 +396,13 @@ public sealed class HeroShotRenderAdapter : IRenderAdapter
         };
     }
 
-    private static IHeroShotRenderProvider GetProvider(
+    internal static IHeroShotRenderProvider GetProvider(
         string? name,
         AppConfig.HeroShotConfig cfg,
         Dictionary<string, IHeroShotRenderProvider> cache,
         RunLogger logger)
     {
-        var provider = (name ?? "codex").Trim().ToLowerInvariant();
+        var provider = NormalizeProviderName(name);
         if (cache.TryGetValue(provider, out var existing)) return existing;
 
         IHeroShotRenderProvider created = provider switch
