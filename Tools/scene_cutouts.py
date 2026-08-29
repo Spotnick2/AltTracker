@@ -187,6 +187,10 @@ def main():
     ap.add_argument("--model", default="isnet-general-use")
     ap.add_argument("--only", default=None, help="only process base names containing this substring")
     ap.add_argument("--magick", default="magick")
+    ap.add_argument("--source", choices=("ai", "armory"), default="ai",
+                    help="cutout source: 'ai' segments the hero shot (default, matches the "
+                         "painted look of the List view); 'armory' trims the Battle.net render's "
+                         "real alpha (exact gear, but the raw in-game model)")
     args = ap.parse_args()
 
     paths = load_paths()
@@ -212,12 +216,14 @@ def main():
             session_holder["s"] = new_session(args.model)
         return session_holder["s"]
 
-    print(f"characters: {len(chars)}")
+    print(f"characters: {len(chars)}; source: {args.source}")
 
     # Start from what is already on disk so a filtered run updates its own entries instead of
     # dropping every character it did not touch.
     merged = parse_scene_manifest(paths["scene_manifest_deployed"]) \
              or parse_scene_manifest(paths["scene_manifest_repo"])
+    # Preferred source first, the other as fallback: AI -> armory, or armory -> AI.
+    order = ("ai", "armory") if args.source == "ai" else ("armory", "ai")
     produced, from_armory, from_model = 0, 0, 0
 
     for key, base in chars:
@@ -225,24 +231,39 @@ def main():
         out_base = base_noext + ".tga"
         out = os.path.join(paths["scene_dir"], out_base)
 
-        armory = find_armory_render(paths["armory_cache"], base_noext)
         src = os.path.join(paths["render_dir"], base)
+        armory = find_armory_render(paths["armory_cache"], base_noext)
 
-        try:
-            if armory:
-                w, h = cut_from_armory(armory, out, args.magick)
-                origin = "armory"
-                from_armory += 1
-            elif os.path.exists(src):
-                w, h = cut_one(get_session(), src, out, args.magick)
-                origin = "model"
-                from_model += 1
-            else:
-                print(f"  skip {key}: no armory render and no source portrait ({base})")
+        # Only the sources that actually have material for this character.
+        available = {}
+        if os.path.exists(src):
+            available["ai"] = lambda: cut_one(get_session(), src, out, args.magick)
+        if armory:
+            available["armory"] = lambda: cut_from_armory(armory, out, args.magick)
+
+        size = origin = None
+        for name in order:
+            produce = available.get(name)
+            if produce is None:
                 continue
-        except Exception as ex:  # noqa: BLE001 - report and keep going on the rest
-            print(f"  FAIL {key}: {ex}")
+            try:
+                size = produce()
+                origin = name
+                break
+            except Exception as ex:  # noqa: BLE001 - try the next source, then move on
+                print(f"  warn {key}: {name} source failed ({ex})")
+
+        if origin is None:
+            # No entry means the addon draws this character as a framed card - and because
+            # CampHasCutouts is all-or-nothing, that drops the whole camp to cards.
+            print(f"  skip {key}: no AI portrait and no armory render -> framed card")
             continue
+
+        w, h = size
+        if origin == "armory":
+            from_armory += 1
+        else:
+            from_model += 1
 
         merged[key] = (out_base, str(w), str(h))
         produced += 1
@@ -256,7 +277,7 @@ def main():
     entries.sort(key=lambda e: e[0])
     write_scene_manifest(paths["scene_manifest_deployed"], entries)
     write_scene_manifest(paths["scene_manifest_repo"], entries)
-    print(f"produced {produced} cutout(s): {from_armory} from armory, {from_model} via the model")
+    print(f"produced {produced} cutout(s): {from_model} from AI art, {from_armory} from armory renders")
     print(f"wrote scene manifest ({len(entries)} entries, {len(entries) - produced} carried over):")
     print(f"  deployed: {paths['scene_manifest_deployed']}")
     print(f"  repo:     {paths['scene_manifest_repo']}")
