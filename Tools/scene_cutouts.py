@@ -6,14 +6,20 @@ Phase B of the Midnight-style scene. This is a deliberately SEPARATE, decoupled 
 .NET render pipeline: it does NOT touch that pipeline's manifest, gear hashes or state, so the
 List-view heroshot portraits are never modified.
 
-Cutouts come from one of two sources, in order:
+Cutouts come from two possible sources, tried in an order set by --source:
 
-  1. The cached Battle.net armory render, when the pipeline has downloaded one. It is already a
-     transparent PNG of exactly this character's gear, so the cutout is just an alpha-bbox trim —
-     pixel-perfect edges, no segmentation model, no guesswork.
-  2. Otherwise the opaque 512x896 AI hero shot, cut out with a segmentation model
-     (rembg / isnet-general-use). The model is loaded lazily, so a run fully covered by armory
-     renders never pays for it.
+  * ai (default) — the opaque 512x896 AI hero shot, cut out with a segmentation model
+    (rembg / isnet-general-use). This matches the painted portraits the List view shows, so the
+    two views read as one set of artwork.
+  * armory — the cached Battle.net render, already a transparent PNG of exactly this character's
+    gear, so the cutout is just an alpha-bbox trim: pixel-perfect edges and no guesswork, at the
+    cost of showing the raw 2007-era model next to painted art.
+
+Whichever is preferred, the other is the fallback. A character with neither (no hero shot and, for
+anyone under level 10, no armory render) gets no manifest entry and the addon draws its framed
+card instead — and since CampHasCutouts is all-or-nothing, that drops the whole camp to cards.
+
+The segmentation model is loaded lazily, so a run that never needs it does not pay for it.
 
 Output:
   * <addon>/Media/SceneCutouts/<base>.tga   — 32-bit alpha cutout, trimmed to the character bbox
