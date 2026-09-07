@@ -180,6 +180,8 @@ public sealed class CodexImagegenProvider : IHeroShotRenderProvider
         sb.Append(" -c model_reasoning_effort=").Append(cfg.ReasoningEffort);
         if (cfg.EnableWebSearch)
             sb.Append(" -c web_search=live");
+        if (!string.IsNullOrWhiteSpace(cfg.Model))
+            sb.Append(" -m ").Append(cfg.Model.Trim());
         if (!string.IsNullOrWhiteSpace(cfg.ExtraArgs))
             sb.Append(' ').Append(cfg.ExtraArgs.Trim());
         sb.Append(" -o ").Append(Q(verdictPath));
