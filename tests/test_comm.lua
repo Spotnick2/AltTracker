@@ -153,11 +153,18 @@ local char = {
     guid = "Player-4-0001", name = "Bob", class = "WARRIOR",
     level = 70, ilvl = 123.6, account = 1, lastUpdate = 1000,
     gearlink_head = "|Hitem:12345|h[Helm]|h",  -- must be excluded (local-only)
+    -- gearmod_ is the opposite of gearlink_: it MUST ride the wire. The value
+    -- carries colons, which is the interesting case for the "^([^:]+):(.*)$"
+    -- split in DeserializeChar.
+    gearmod_head  = "2673:0:0:0:0",
+    gearmod_chest = "2661:2:24028:35759:0",
+    gearmod_wrist = "0:?:0:0:0",                 -- unresolved socket count
     specIcon = 98765,                            -- must be excluded (client-specific)
     someTable = { nested = true },               -- must be excluded (table)
 }
 local s = T.SerializeChar(char)
 check(not s:find("gearlink_head", 1, true), "gearlink_ fields excluded from serialization")
+check(s:find("gearmod_head", 1, true) ~= nil, "gearmod_ fields ARE included in serialization")
 check(not s:find("specIcon", 1, true),      "specIcon excluded from serialization")
 check(not s:find("someTable", 1, true),     "table-valued fields excluded from serialization")
 
@@ -168,7 +175,52 @@ eq(d.class, "WARRIOR",       "class round-trips")
 eq(d.level, 70,              "integer field round-trips as a number")
 eq(d.ilvl,  123.6,           "float field round-trips as a number")
 eq(d.lastUpdate, 1000,       "lastUpdate round-trips")
+eq(d.gearmod_head,  "2673:0:0:0:0",           "packed gearmod_ round-trips intact")
+eq(d.gearmod_chest, "2661:2:24028:35759:0",   "colon-bearing gearmod_ survives the first-colon split")
+eq(d.gearmod_wrist, "0:?:0:0:0",              "unresolved '?' socket count round-trips")
+eq(type(d.gearmod_head), "string",            "gearmod_ stays a string (tonumber must not coerce it)")
 check(T.DeserializeChar("name:NoGuid\nlevel:10") == nil, "record without a guid is rejected")
+
+-- Helm/cloak display toggles. They MUST ride the wire: the render pipeline reads one
+-- aggregator account, so an alt's toggle only reaches it via sync. They are 1/0 numbers
+-- rather than booleans precisely so the tonumber() coercion in DeserializeChar round-trips
+-- them unchanged -- a boolean would arrive as the string "true".
+local toggles = T.SerializeChar({
+    guid = "Player-4-0002", name = "Hidden", class = "WARLOCK", level = 70, lastUpdate = 1,
+    hidehelm = 1, hidecloak = 0,
+})
+check(toggles:find("hidehelm:1", 1, true) ~= nil,  "hidehelm rides the wire")
+check(toggles:find("hidecloak:0", 1, true) ~= nil, "hidecloak rides the wire")
+
+local dt = T.DeserializeChar(toggles)
+eq(dt.hidehelm,  1, "hidehelm round-trips as a number")
+eq(dt.hidecloak, 0, "hidecloak round-trips as a number")
+eq(type(dt.hidehelm), "number", "hidehelm stays a number (a boolean would arrive as a string)")
+
+-- Absent is the back-compat case: a peer on an older build sends no toggle at all, and the
+-- reader must treat that as "shown", never as "hidden".
+local noToggles = T.DeserializeChar(T.SerializeChar({
+    guid = "Player-4-0003", name = "Old", class = "MAGE", level = 70, lastUpdate = 1,
+}))
+eq(noToggles.hidehelm,  nil, "absent hidehelm stays absent (reader defaults it to shown)")
+eq(noToggles.hidecloak, nil, "absent hidecloak stays absent")
+
+-- Mixed-version merge: a peer on a build that predates the toggles sends no hidehelm at all.
+-- ClearSyncedStateFields must drop the previously-synced value rather than let it linger, so
+-- the record falls back to "shown" instead of trusting a scan that peer can no longer confirm.
+AltTrackerDB = {}
+T.DeserializeFullDB(T.SerializeChar({
+    guid = "Player-4-0004", name = "Mixed", class = "PRIEST", level = 70,
+    lastUpdate = 1000, hidehelm = 1,
+}) .. "\n" .. T.CHAR_SEP, "NewPeer")
+eq(AltTrackerDB["Player-4-0004"].hidehelm, 1, "toggle arrives from a current peer")
+
+T.DeserializeFullDB(T.SerializeChar({
+    guid = "Player-4-0004", name = "Mixed", class = "PRIEST", level = 70,
+    lastUpdate = 2000,          -- newer, and carries no toggle at all
+}) .. "\n" .. T.CHAR_SEP, "OldPeer")
+eq(AltTrackerDB["Player-4-0004"].hidehelm, nil,
+   "a peer that predates the field clears the stale toggle instead of leaving it set")
 
 ------------------------------------------------------------
 -- 4. Full-DB serialize / deserialize round-trip
@@ -517,6 +569,8 @@ AltTrackerDB = { ["Player-Stale-1"] = {
     -- A stale link left over from an old addon version that synced links; on a
     -- received (remote) record this is never trustworthy and must be cleared.
     gearlink_head = "|Hitem:111|h[Felheart Horns]|h",
+    -- Likewise stale: the peer re-enchanted, so the old packed mods must not survive.
+    gearmod_head = "2673:0:0:0:0",
     account = 2,                     -- metadata, must survive when peer omits it
     lastUpdate = 1000,
 } }
@@ -529,6 +583,7 @@ local rec = AltTrackerDB["Player-Stale-1"]
 eq(rec.gearid_head,   999, "synced item id replaces the old one")
 eq(rec.gearname_head, "Hood of the Corruptor", "synced item name replaces the old one")
 eq(rec.gearlink_head, nil, "stale local-only gearlink_ is cleared on merge (fixes cross-account stale tooltip)")
+eq(rec.gearmod_head,  nil, "stale gearmod_ is cleared on merge -- '^gear_' does NOT match 'gearmod_', so it needs its own pattern")
 eq(rec.account,       2,   "metadata (account) is preserved when the incoming record omits it")
 
 ------------------------------------------------------------

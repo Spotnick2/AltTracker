@@ -920,6 +920,9 @@ local function CreateGearButton(parent, slotKey)
                 GameTooltip:AddLine("iLvl " .. ilvl, 0, 0.85, 1)
             end
         end
+        if AltTracker.RosterAudit then
+            AltTracker.RosterAudit.AddTooltipLines(key)
+        end
         GameTooltip:Show()
     end)
 
@@ -1004,6 +1007,12 @@ local function UpdateGearButtons(char)
                 btn:SetBackdropBorderColor(unpack(AltTracker.C.SEP))
             end
         end
+    end
+
+    -- Stamp the audit dots last, so they sit over the finished buttons. This
+    -- also refreshes the per-slot index the gear tooltip reads.
+    if AltTracker.RosterAudit then
+        AltTracker.RosterAudit.ApplyBadges(char, gearButtons)
     end
 end
 
@@ -2863,6 +2872,9 @@ local function UpdateDetail()
     UpdateCharacterRows(selectedChar)
     UpdateRepRows(selectedChar)
     UpdateProfRows(selectedChar)
+    if AltTracker.RosterAudit then
+        SetTabContentHeight("audit", AltTracker.RosterAudit.RenderTab(selectedChar))
+    end
 end
 
 local function UpdateFooter()
@@ -3024,6 +3036,7 @@ local function BuildTabs()
         { id = "character", label = "Character", short = "Char" },
         { id = "reputations", label = "Reputations", short = "Reps" },
         { id = "professions", label = "Professions", short = "Profs" },
+        { id = "audit",       label = "Audit",       short = "Audit" },
     }
 
     for i, t in ipairs(tabs) do
@@ -3105,8 +3118,14 @@ local function BuildTabs()
     CreateTabBody("character")
     CreateTabBody("reputations")
     CreateTabBody("professions")
+    CreateTabBody("audit")
     tabScrollFrames.reputations:Hide()
     tabScrollFrames.professions:Hide()
+    tabScrollFrames.audit:Hide()
+
+    if AltTracker.RosterAudit then
+        AltTracker.RosterAudit.BuildTab(tabFrames.audit)
+    end
 
     charRows = { groups = {} }
     repRows = {}

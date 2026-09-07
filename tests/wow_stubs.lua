@@ -173,5 +173,68 @@ function WoW.flushTimers()
     for _, fn in ipairs(q) do fn() end
 end
 
+------------------------------------------------------------
+-- Item API stubs
+--
+-- WoW.items is a tiny fake item cache keyed by item id. An id that is ABSENT
+-- models a cache miss: every accessor returns nil, which is what the gear
+-- scanner's retry path and the audit's "unresolved" states are built around.
+--
+--   WoW.items[30734] = {
+--       name = "Spellstrike Pants", quality = 4, ilvl = 141,
+--       itemType = "Armor", subType = "Cloth", equipLoc = "INVTYPE_LEGS",
+--       classID = 4, subClassID = 1,
+--       sockets = { red = 1, yellow = 1 },   -- template sockets
+--   }
+------------------------------------------------------------
+
+WoW.items = {}
+
+-- Accepts a bare id, an "item:<id>" string, or a full hyperlink.
+local function stubItemID(v)
+    if type(v) == "number" then return v end
+    if type(v) ~= "string" then return nil end
+    return tonumber(v:match("item:(%d+)")) or tonumber(v)
+end
+
+local function stubItem(v)
+    local id = stubItemID(v)
+    return id and WoW.items[id] or nil, id
+end
+
+function GetItemInfo(v)
+    local it, id = stubItem(v)
+    if not it then return nil end
+    return it.name, "|Hitem:" .. id .. "|h[" .. (it.name or "") .. "]|h",
+           it.quality, it.ilvl, it.minLevel or 1,
+           it.itemType, it.subType, it.stackCount or 1,
+           it.equipLoc, it.texture or "", it.sellPrice or 0
+end
+
+function GetItemInfoInstant(v)
+    local it, id = stubItem(v)
+    if not it then return nil end
+    return id, it.itemType, it.subType, it.equipLoc, it.texture or "",
+           it.classID, it.subClassID
+end
+
+function GetItemIcon(v)
+    local it = stubItem(v)
+    return it and (it.texture or "Interface\Icons\INV_Misc_QuestionMark") or nil
+end
+
+function GetItemStats(v)
+    local it = stubItem(v)
+    if not it then return nil end
+    local stats = {}
+    for color, key in pairs({ red = "EMPTY_SOCKET_RED", yellow = "EMPTY_SOCKET_YELLOW",
+                              blue = "EMPTY_SOCKET_BLUE", meta = "EMPTY_SOCKET_META",
+                              prismatic = "EMPTY_SOCKET_PRISMATIC" }) do
+        local n = it.sockets and it.sockets[color]
+        if n and n > 0 then stats[key] = n end
+    end
+    return stats
+end
+
 _G.WoW = WoW
 return WoW

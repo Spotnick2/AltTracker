@@ -30,4 +30,15 @@ public sealed class CharacterRecord
     /// <summary>Per-slot item subtype captured in-client from GetItemInfo (e.g. "Dagger", "Mail").
     /// Authoritative weapon/armor type; empty for slots scanned before this field existed.</summary>
     public IReadOnlyDictionary<string, string> GearSubTypes { get; init; } = new Dictionary<string, string>();
+
+    /// <summary>False when the player has helm display switched off in game. The armory render
+    /// honours that toggle but the equipped-item list does not, and the prompt tells the model to
+    /// trust the item list over the reference — so without this a character who hides their helm
+    /// gets a portrait wearing one. Defaults to true: a record scanned before the addon captured
+    /// the flag has no value, and true is the behaviour those records already had.</summary>
+    public bool ShowHelm { get; init; } = true;
+
+    /// <summary>False when the player has cloak display switched off. Same reasoning as
+    /// <see cref="ShowHelm"/>.</summary>
+    public bool ShowCloak { get; init; } = true;
 }

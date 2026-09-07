@@ -49,6 +49,13 @@ public static class HeroShotSignatureBuilder
             ["referenceFingerprint"] = referenceFingerprint ?? "",
         };
 
+        // Only present when a slot is actually hidden. Adding these unconditionally would change
+        // every existing signature and force a full re-render of the whole roster; keyed this way,
+        // only characters whose portrait would actually differ get invalidated. Flipping the toggle
+        // in game still adds or removes the key, which is what makes the re-render happen.
+        if (!character.ShowHelm) canonical["hideHelm"] = true;
+        if (!character.ShowCloak) canonical["hideCloak"] = true;
+
         var json = JsonSerializer.Serialize(canonical, new JsonSerializerOptions
         {
             WriteIndented = false,
