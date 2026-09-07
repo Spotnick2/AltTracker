@@ -66,7 +66,7 @@ local MSG_DONE = "DONE"
 --          carry opaque encoded bytes (byte-split, not line-aligned). The
 --          checksum is computed over the encoded stream. Huge size win on the
 --          repetitive recipe payload.
-local PROTOCOL_VERSION = "7"
+local PROTOCOL_VERSION = "8"
 local MSG_REQUEST_V = MSG_REQUEST .. PROTOCOL_VERSION   -- "REQ7"
 local MSG_DONE_V    = MSG_DONE    .. PROTOCOL_VERSION   -- "DONE7"
 local MSG_CHUNK_V   = MSG_CHUNK   .. "5"                -- "CHUNK5"
@@ -235,6 +235,12 @@ local function SerializeChar(c, sinceTS)
         and k ~= "specIcon"            -- numeric fileID, client-specific
         -- NOTE: refshot_ts (reference-screenshot marker) IS synced on purpose. The render
         -- pipeline reads ONE aggregator account, so an alt's marker must ride sync to reach it.
+        -- NOTE: hidehelm / hidecloak ride sync for the same reason — the pipeline has to know
+        -- the player hid a slot, since the equipped item list alone can't tell it. They are
+        -- plain 1/0 numbers, so the tonumber() coercion below round-trips them unchanged.
+        -- They must NOT become booleans: tostring(false) sends "false", which tonumber() leaves
+        -- as the STRING "false" — and a non-empty string is truthy in Lua, so a hidden-cloak
+        -- flag would read as shown and vice versa.
         -- The screenshot lives in the install-wide Screenshots folder, so any account on this
         -- machine resolves it; cross-machine peers just won't match and fall back to the saved ref.
         then
@@ -426,10 +432,18 @@ local function ClearSyncedStateFields(t)
     t.prof1 = nil; t.prof2 = nil
     t.prof1Skill = nil; t.prof2Skill = nil
     t.prof1Max   = nil; t.prof2Max   = nil
+    -- Helm/cloak display toggles. A current peer always sends both (the scanner writes 1 or 0
+    -- every scan), so the merge below restores them immediately. Clearing them first only
+    -- matters for a MIXED-VERSION peer whose build predates the fields: without this, a
+    -- previously-synced hidehelm=1 would linger and keep rendering that character bare-headed
+    -- on the word of a scan that peer can no longer confirm. Absent means "shown", which is
+    -- the safe direction to fail.
+    t.hidehelm = nil; t.hidecloak = nil
     for k in pairs(t) do
         if k:find("^prof_") or k:find("^profmax_")
         or k:find("^gear_") or k:find("^gearq_")
         or k:find("^gearname_") or k:find("^gearid_")
+        or k:find("^gearmod_")   -- NOTE: "^gear_" does NOT match "gearmod_"
         or k:find("^gearlink_") or k:find("^gearsubtype_")  -- both local-only (see note above)
         or k:find("^cd_") or k:find("^known_")   -- craft cooldowns (dynamic cd_<prof>@<label>) + legacy known_ flags
         or k:find("^si_")                        -- saved raid lockouts (si_<name>@<diff>)
@@ -1603,27 +1617,50 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
     if event == "GET_ITEM_INFO_RECEIVED" then
         local itemID, success = ...
-        if not success or not AltTracker.PendingGearLinks then return end
+        if not success then return end
+
+        -- Gem lookups the Roster audit could not resolve. Checked BEFORE the
+        -- gear-slot queue below, which is local-equipment-only and is nil
+        -- entirely when nothing local is pending -- the early return on it used
+        -- to drop these events on the floor, so an audit finding suppressed by
+        -- a cache miss stayed invisible until something else repainted the tab.
+        -- RefreshSheet is enough: the Roster plugin hooks it and already
+        -- coalesces bursts into one deferred repaint.
+        local pendingAudit = AltTracker.PendingAuditItems
+        if pendingAudit and itemID and pendingAudit[itemID] then
+            pendingAudit[itemID] = nil
+            if AltTracker.RefreshSheet then AltTracker.RefreshSheet() end
+        end
+
+        if not AltTracker.PendingGearSlots then return end
 
         local anyResolved = false
-        for link, info in pairs(AltTracker.PendingGearLinks) do
-            local itemName, _, quality, ilvl, _, _, itemSubType = GetItemInfo(link)
+        for slotKey, info in pairs(AltTracker.PendingGearSlots) do
+            local itemName, _, quality, ilvl, _, _, itemSubType = GetItemInfo(info.link)
             if ilvl then
                 local char = AltTrackerDB[info.guid]
-                if char then
-                    char["gear_"..info.key]  = ilvl
-                    char["gearq_"..info.key] = quality or 0
-                    if itemName and itemName ~= "" then char["gearname_"..info.key] = itemName end
-                    char["gearsubtype_"..info.key] = itemSubType or ""
+                -- The slot may have changed since the retry was queued; only write
+                -- if it still holds the item we were waiting on.
+                if char and char["gearlink_"..slotKey] == info.link then
+                    char["gear_"..slotKey]  = ilvl
+                    char["gearq_"..slotKey] = quality or 0
+                    if itemName and itemName ~= "" then char["gearname_"..slotKey] = itemName end
+                    char["gearsubtype_"..slotKey] = itemSubType or ""
+                    -- Re-pack now that the item is cached: this is what turns an
+                    -- unresolved "?" socket count into a real one.
+                    if AltTracker.RepackGearMod then
+                        char["gearmod_"..slotKey] =
+                            AltTracker.RepackGearMod(info.link, char["gearid_"..slotKey])
+                    end
                     anyResolved = true
                 end
-                AltTracker.PendingGearLinks[link] = nil
+                AltTracker.PendingGearSlots[slotKey] = nil
             end
         end
 
         -- Stamp lastUpdate once all pending slots resolve, but don't broadcast.
         -- The updated gear will go out on the next login sync.
-        if anyResolved and not next(AltTracker.PendingGearLinks) then
+        if anyResolved and not next(AltTracker.PendingGearSlots) then
             local guid = UnitGUID("player")
             local char = guid and AltTrackerDB[guid]
             if char then char.lastUpdate = time() end

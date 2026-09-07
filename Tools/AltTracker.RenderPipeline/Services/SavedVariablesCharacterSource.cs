@@ -89,6 +89,10 @@ public sealed class SavedVariablesCharacterSource
                 Level = ReadInt(t, "level"),
                 LastUpdateEpoch = ReadLong(t, "lastUpdate"),
                 ReferenceShotEpoch = ReadLong(t, "refshot_ts"),
+                // Stored by the addon as 1 = hidden. ReadInt yields 0 for an absent key, so a
+                // record scanned before the field existed reads as "shown" and renders as before.
+                ShowHelm = ReadInt(t, "hidehelm") == 0,
+                ShowCloak = ReadInt(t, "hidecloak") == 0,
                 GearItemIds = gearIds,
                 GearLinks = gearLinks,
                 GearNames = gearNames,

@@ -17,7 +17,7 @@ public static class HeroShotPromptBuilder
         var hasOffHandGear = character.GearItemIds.TryGetValue("offhand", out var offHandId) && offHandId > 0;
         var hasRangedGear = character.GearItemIds.TryGetValue("ranged", out var rangedId) && rangedId > 0;
 
-        var directive      = BuildDirective(stylePreset, hasReferenceImage);
+        var directive      = BuildDirective(stylePreset, hasReferenceImage, character.ShowHelm);
         var subject        = BuildSubject(race, gender, cls);
         var raceDetails    = BuildRaceDetails(race, gender);
         var classHint      = BuildClassHint(cls, hasRangedGear);
@@ -49,7 +49,10 @@ public static class HeroShotPromptBuilder
 
     // ── Directive ─────────────────────────────────────────────────────────────
 
-    private static string BuildDirective(string stylePreset, bool hasReferenceImage)
+    /// <param name="showHelm">False when the player hides their helm. The reference already shows
+    /// the bare head, but the gear list is declared authoritative over the reference for armor, so
+    /// the head instruction has to be flipped explicitly or the model reinstates the helmet.</param>
+    private static string BuildDirective(string stylePreset, bool hasReferenceImage, bool showHelm = true)
     {
         var action = stylePreset.ToLowerInvariant() switch
         {
@@ -66,9 +69,13 @@ public static class HeroShotPromptBuilder
                    "Reproduce that same framing and depth-of-field treatment. " +
                    "Use the screenshot as the reference for the character's IDENTITY ONLY: race, skin tone, facial features, " +
                    "hair and tusks, body build, and overall pose. " +
-                   "Match the head to the reference precisely, including how the hair sits with any headwear: when the " +
-                   "character wears a hat, hood, or helmet, the hair falls under or around it exactly as shown — never " +
-                   "render a mohawk, spikes, or any hairstyle poking over, above, or through the headgear. " +
+                   (showHelm
+                       ? "Match the head to the reference precisely, including how the hair sits with any headwear: when the " +
+                         "character wears a hat, hood, or helmet, the hair falls under or around it exactly as shown — never " +
+                         "render a mohawk, spikes, or any hairstyle poking over, above, or through the headgear. "
+                       : "This character wears NO headgear: the head is bare and the hair is fully visible. Render the head " +
+                         "and hairstyle exactly as the reference shows them, and do not add a helmet, hood, hat, circlet, " +
+                         "mask, or any other head covering — no head slot appears in the gear list below, deliberately. ") +
                    "Do NOT rely on the screenshot to determine the appearance of armor or weapons — the character-select " +
                    "angle, lighting, and low resolution make transmog unreliable to read. " +
                    "Instead, render each equipped piece from the authoritative gear list below, matching each item's true " +
@@ -240,6 +247,12 @@ public static class HeroShotPromptBuilder
         var lines = new List<string>();
         foreach (var (slot, label) in VisibleGearSlots)
         {
+            // A hidden helm/cloak is still equipped, so it is still in GearNames — but the player
+            // never sees it and neither does the armory reference. Listing it here would put it
+            // back on the character, because this list outranks the reference for armor.
+            if (slot == "head" && !character.ShowHelm) continue;
+            if (slot == "back" && !character.ShowCloak) continue;
+
             var name = TryExtractItemName(character, slot);
             if (string.IsNullOrWhiteSpace(name)) continue;
 

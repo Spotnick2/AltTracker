@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using AltTracker.RenderPipeline.Infrastructure;
@@ -21,6 +21,10 @@ namespace AltTracker.RenderPipeline.Services.HeroShot;
 public sealed class CodexImagegenProvider : IHeroShotRenderProvider
 {
     private static readonly byte[] PngMagic = { 0x89, 0x50, 0x4E, 0x47 };
+
+    /// <summary>Ratio slack before a frame counts as "too tall". Rounding to whole pixels moves the ratio
+    /// slightly, so an exact-size render must not trip the warning.</summary>
+    private const double AspectTolerance = 0.005;
 
     private readonly AppConfig.HeroShotConfig _cfg;
     private readonly RunLogger _logger;
@@ -57,7 +61,7 @@ public sealed class CodexImagegenProvider : IHeroShotRenderProvider
                 ? new HashSet<string>(Directory.EnumerateFiles(genDir, "*.png", SearchOption.AllDirectories), StringComparer.OrdinalIgnoreCase)
                 : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            var prompt = BuildPrompt(request.Prompt, refTempPath, codexCfg.EnableWebSearch);
+            var prompt = BuildPrompt(request.Prompt, refTempPath, codexCfg.EnableWebSearch, request.Width, request.Height);
             var codexExe = string.IsNullOrWhiteSpace(codexCfg.CodexExecutable) ? "codex" : codexCfg.CodexExecutable;
             var args = BuildArguments(codexCfg, verdictPath);
 
@@ -88,6 +92,8 @@ public sealed class CodexImagegenProvider : IHeroShotRenderProvider
 
             if (!HasPngMagic(bytes))
                 return Fail($"generated artifact '{chosen}' is not a PNG (magic-byte check failed).", stderr, stdout);
+
+            WarnOnRiskyAspect(bytes, request.Width, request.Height);
 
             _logger.Info($"[Codex] Image ready: {chosen} ({bytes.Length} bytes)");
             return new HeroShotResponse { Success = true, ImageBytes = bytes };
@@ -174,6 +180,8 @@ public sealed class CodexImagegenProvider : IHeroShotRenderProvider
         sb.Append(" -c model_reasoning_effort=").Append(cfg.ReasoningEffort);
         if (cfg.EnableWebSearch)
             sb.Append(" -c web_search=live");
+        if (!string.IsNullOrWhiteSpace(cfg.Model))
+            sb.Append(" -m ").Append(cfg.Model.Trim());
         if (!string.IsNullOrWhiteSpace(cfg.ExtraArgs))
             sb.Append(' ').Append(cfg.ExtraArgs.Trim());
         sb.Append(" -o ").Append(Q(verdictPath));
@@ -182,7 +190,11 @@ public sealed class CodexImagegenProvider : IHeroShotRenderProvider
 
     // ── prompt ──────────────────────────────────────────────────────────────
 
-    private static string BuildPrompt(string corePrompt, string? refTempPath, bool webSearchEnabled)
+    /// <param name="width">Target render width; paired with <paramref name="height"/> it fixes the aspect
+    /// ratio the publish step center-crops to. Passing it matters: without an explicit ratio the model picks
+    /// its own, and anything taller than the target silently loses the head and feet to that crop.</param>
+    /// <param name="height">Target render height. See <paramref name="width"/>.</param>
+    internal static string BuildPrompt(string corePrompt, string? refTempPath, bool webSearchEnabled, int width, int height)
     {
         var sb = new StringBuilder();
         sb.AppendLine("Use the imagegen skill (the built-in image_gen tool) to generate ONE image.");
@@ -216,7 +228,24 @@ public sealed class CodexImagegenProvider : IHeroShotRenderProvider
         sb.AppendLine(corePrompt);
         sb.AppendLine();
         sb.AppendLine("Requirements:");
-        sb.AppendLine("- Vertical full-body character portrait, portrait orientation (taller than wide).");
+        if (width > 0 && height > 0)
+        {
+            var (aspectW, aspectH) = ReduceRatio(width, height);
+            var ratio = (double)width / height;
+            sb.AppendLine($"- Vertical full-body character portrait, {width}x{height} pixels " +
+                          $"(aspect ratio {aspectW}:{aspectH}, width divided by height = {ratio:0.###}).");
+            sb.AppendLine($"- The image is afterwards resized and CENTER-CROPPED to exactly {aspectW}:{aspectH}; " +
+                          "whatever falls outside that centred region is thrown away. Do NOT generate a frame " +
+                          "TALLER than that ratio - a taller frame has its top and bottom cut off, which " +
+                          "decapitates the character and removes the feet. If you cannot hit the exact size, " +
+                          "err on the side of a WIDER frame: surplus width is cropped away harmlessly.");
+            sb.AppendLine($"- Keep the whole character - top of the head, weapons and feet - inside the centred " +
+                          $"{aspectW}:{aspectH} region, with visible margin on every side.");
+        }
+        else
+        {
+            sb.AppendLine("- Vertical full-body character portrait, portrait orientation (taller than wide).");
+        }
         sb.AppendLine("- Produce EXACTLY ONE image.");
         sb.AppendLine("- Do NOT edit, create, or modify any files in the repository or working directory.");
         sb.AppendLine("- After generating, report on its own line the EXACT absolute filesystem path of the " +
@@ -296,6 +325,51 @@ public sealed class CodexImagegenProvider : IHeroShotRenderProvider
         var msg = string.IsNullOrWhiteSpace(detail) ? reason : $"{reason} :: {detail}";
         _logger.Warn($"[Codex] {msg}");
         return new HeroShotResponse { Success = false, Error = msg };
+    }
+
+    /// <summary>
+    /// The publish step resizes-to-fill and center-crops to the target ratio, so an image TALLER than the
+    /// target loses its top and bottom - exactly where the head and feet are. The cropped .tga still looks
+    /// like a valid render, so the loss is invisible downstream; log it here instead of shipping silently.
+    /// </summary>
+    private void WarnOnRiskyAspect(byte[] png, int targetWidth, int targetHeight)
+    {
+        if (targetWidth <= 0 || targetHeight <= 0) return;
+        if (!TryReadPngSize(png, out var w, out var h) || w <= 0 || h <= 0) return;
+
+        var target = (double)targetWidth / targetHeight;
+        var actual = (double)w / h;
+        if (actual >= target - AspectTolerance) return;
+
+        var lossPercent = (1.0 - actual / target) * 100.0;
+        _logger.Warn(
+            $"[Codex] Generated image is {w}x{h} (ratio {actual:0.###}), taller than the " +
+            $"{targetWidth}x{targetHeight} target (ratio {target:0.###}). The publish crop will remove about " +
+            $"{lossPercent:0.#}% of the height, split between top and bottom - the head and/or feet may be cut off.");
+    }
+
+    /// <summary>Reads the dimensions straight out of the PNG IHDR chunk (big-endian ints at offsets 16 and 20),
+    /// which avoids decoding the whole image just to check its shape.</summary>
+    private static bool TryReadPngSize(byte[] png, out int width, out int height)
+    {
+        width = 0;
+        height = 0;
+        if (png.Length < 24) return false;
+        width  = (png[16] << 24) | (png[17] << 16) | (png[18] << 8) | png[19];
+        height = (png[20] << 24) | (png[21] << 16) | (png[22] << 8) | png[23];
+        return true;
+    }
+
+    private static (int Width, int Height) ReduceRatio(int width, int height)
+    {
+        var divisor = Gcd(Math.Abs(width), Math.Abs(height));
+        return divisor == 0 ? (width, height) : (width / divisor, height / divisor);
+    }
+
+    private static int Gcd(int a, int b)
+    {
+        while (b != 0) (a, b) = (b, a % b);
+        return a;
     }
 
     private static bool HasPngMagic(byte[] bytes)

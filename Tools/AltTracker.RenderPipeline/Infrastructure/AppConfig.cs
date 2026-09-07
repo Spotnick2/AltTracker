@@ -78,7 +78,14 @@ public sealed class AppConfig
             /// <summary>Hard timeout for a single codex generation, in seconds. Built-in image_gen
             /// commonly takes 2–4 minutes, so keep comfortable margin (no retry happens on timeout).</summary>
             public int TimeoutSeconds { get; set; } = 360;
-            /// <summary>Optional extra args appended to `codex exec` (advanced; e.g. `-m &lt;model&gt;`).</summary>
+            /// <summary>Model that drives codex's image_gen tool (`-m &lt;model&gt;`). This is NOT the image
+            /// model — that stays <see cref="HeroShotConfig.Model"/> (gpt-image-1). This one is the agent that
+            /// reads the reference, looks items up when web search is on, and writes the image prompt, and it
+            /// changes the output enough to be worth pinning: a stronger model reads the armory reference and
+            /// the equipped-item list noticeably better. Empty leaves codex on its configured default.</summary>
+            public string Model { get; set; } = "";
+            /// <summary>Optional extra args appended to `codex exec`. Genuinely ad-hoc escape hatch — the
+            /// model belongs in <see cref="Model"/>, which is validated and rides the render signature.</summary>
             public string ExtraArgs { get; set; } = "";
             /// <summary>When true, enables codex's web-search tool (`-c web_search=live`) so it can look up
             /// each named item's real in-game appearance (e.g. on Wowhead) before generating. More accurate
@@ -239,6 +246,7 @@ public sealed class AppConfig
         if (cfg.HeroShot.Codex.ReasoningEffort is not ("low" or "medium" or "high"))
             throw new PipelineDataException($"Invalid HeroShot.Codex.ReasoningEffort: {cfg.HeroShot.Codex.ReasoningEffort}. Allowed: low, medium, high.");
         cfg.HeroShot.Codex.TimeoutSeconds = Math.Max(30, cfg.HeroShot.Codex.TimeoutSeconds);
+        cfg.HeroShot.Codex.Model = (cfg.HeroShot.Codex.Model ?? "").Trim();
         cfg.HeroShot.Codex.ExtraArgs = (cfg.HeroShot.Codex.ExtraArgs ?? "").Trim();
 
         return cfg;

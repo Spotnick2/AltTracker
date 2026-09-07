@@ -109,9 +109,31 @@ AddOns list). Core is copied additively; plugin folders are mirrored (stale file
   the `field` names it shows.
 - **BiS data** (`BisData.lua`): `AltTracker.BisData[CLASS_FILE][Spec][Tier][slotKey]`; item
   names must match `GetItemInfo()` exactly.
-- **Character record fields:** gear as `gear_<slot>` / `gearq_<slot>` / `gearname_<slot>`
-  (`gearlink_*` is local-only, not synced); professions as `prof_<Name>` / `profmax_<Name>`
-  matching `GetSkillLineInfo`; cooldowns as `cd_<Name>` Unix timestamps.
+- **Character record fields:** gear as `gear_<slot>` (ilvl) / `gearq_<slot>` (quality) /
+  `gearid_<slot>` / `gearname_<slot>` / `gearmod_<slot>`; `gearlink_*` and `gearsubtype_*`
+  are local-only, not synced. Professions as `prof_<Name>` / `profmax_<Name>` matching
+  `GetSkillLineInfo`; cooldowns as `cd_<Name>` Unix timestamps.
+- **`hidehelm` / `hidecloak`** capture the in-game helm/cloak display toggles
+  (`ShowingHelm()` / `ShowingCloak()`), `1` = hidden. They **are** synced: the render
+  pipeline reads one aggregator account, and the equipped-item list alone cannot tell it
+  the player hides a slot (the Battle.net armory render does honour the toggle, but the
+  prompt declares the item list authoritative over the reference for armor). Two rules
+  worth keeping: they are **numbers, not booleans**, because `DeserializeChar` coerces with
+  `tonumber` and a boolean would arrive at a peer as the *string* `"true"` while staying a
+  real boolean locally (the asymmetry `restedArea` already has); and they are named for the
+  **hidden** state, so an absent key -- an old record, or a peer on an older build -- reads
+  as `0` = shown = the behaviour that predates the field. `ClearSyncedStateFields` does not
+  wipe them, which is fine because the scanner always writes `1` or `0`, so the key is
+  always present in a payload and always overwritten.
+- **`gearmod_<slot>`** packs the permanent enchant, socket count and gems as
+  `"<ench>:<sockets>:<g1>:<g2>:<g3>"` for the Roster gear audit. Four states are
+  distinct and must stay that way: absent (record predates the field -> audit
+  unavailable), `""` (empty slot), `?` in the sockets position (uncached at scan
+  time -> gem checks suppressed), and `0` (confirmed no sockets). A `?` must never
+  be flattened to `0` -- that silently hides a missing gem. Adding any new
+  `gear*_` field means touching three places: the reset in `Scanner.lua`, the
+  denylist in `SerializeChar`, and the wipe list in `ClearSyncedStateFields`
+  (note `^gear_` does **not** match `gearmod_`).
 - **Sync protocol** uses prefix `"ALTTRACKER"`, `"CMD|payload"` messages; records serialize
   as `key:value\n` lines separated by `==END==`. Read `Core.lua` before touching it, and
   keep a corresponding `tests/test_comm.lua` case green.

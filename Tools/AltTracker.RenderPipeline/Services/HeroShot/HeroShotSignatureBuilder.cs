@@ -49,6 +49,19 @@ public static class HeroShotSignatureBuilder
             ["referenceFingerprint"] = referenceFingerprint ?? "",
         };
 
+        // Only present when a slot is actually hidden. Adding these unconditionally would change
+        // every existing signature and force a full re-render of the whole roster; keyed this way,
+        // only characters whose portrait would actually differ get invalidated. Flipping the toggle
+        // in game still adds or removes the key, which is what makes the re-render happen.
+        // The codex driver model materially changes the portrait (it reads the reference and writes
+        // the image prompt), so switching it must invalidate cached renders the same way a style or
+        // reference change does. Written only when pinned, so an empty setting keeps prior signatures.
+        if (!string.IsNullOrWhiteSpace(cfg.Codex?.Model))
+            canonical["codexModel"] = cfg.Codex.Model.Trim();
+
+        if (!character.ShowHelm) canonical["hideHelm"] = true;
+        if (!character.ShowCloak) canonical["hideCloak"] = true;
+
         var json = JsonSerializer.Serialize(canonical, new JsonSerializerOptions
         {
             WriteIndented = false,

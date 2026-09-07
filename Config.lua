@@ -55,6 +55,17 @@ local function EnsureDefaults()
     -- silently left on whatever the old hardcoded constant was.
     AltTrackerConfig.bisTier = AltTrackerConfig.bisTier or "T6"
 
+    -- Roster gear audit. minGemQuality is the lowest gem quality considered
+    -- acceptable (0 disables gem checks entirely, 3 = Rare, 4 = Epic), matching
+    -- CLA's "minimum required gem quality" selector. auditMinLevel keeps the
+    -- audit quiet on levelling alts, where a bare enchant slot is not a finding.
+    if AltTrackerConfig.minGemQuality == nil then
+        AltTrackerConfig.minGemQuality = 3
+    end
+    if AltTrackerConfig.auditMinLevel == nil then
+        AltTrackerConfig.auditMinLevel = 70
+    end
+
     -- Appearance defaults
     AltTrackerConfig.theme = AltTrackerConfig.theme or "dark"
     if AltTrackerConfig.scale == nil then

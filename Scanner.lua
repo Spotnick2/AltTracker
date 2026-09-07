@@ -53,6 +53,85 @@ local function ItemIDFromLink(link)
     return tonumber(id) or 0
 end
 
+------------------------------------------------------------
+-- Permanent enchant + gems, packed for sync
+--
+-- The TBC itemString is
+--   item:id:enchant:gem1:gem2:gem3:gem4:suffix:unique:level:...
+-- The capture below is deliberately NOT anchored: it has to match inside
+-- the full "|cff...|Hitem:...|h[Name]|h|r" hyperlink wrapper. [^:|]* (not
+-- %d+) is required because any of these fields may be empty, and the tail
+-- is left unanchored so extra client-version fields don't break the match.
+--
+-- TBC caps items at three sockets, so only gem1..gem3 are stored; gem4 is
+-- captured purely so a non-zero value can be spotted rather than silently
+-- ignored.
+------------------------------------------------------------
+
+local SOCKET_STAT_KEYS = {
+    "EMPTY_SOCKET_RED", "EMPTY_SOCKET_YELLOW", "EMPTY_SOCKET_BLUE",
+    "EMPTY_SOCKET_META", "EMPTY_SOCKET_PRISMATIC",
+}
+
+-- Socket count for an item, or nil when it can't be resolved yet.
+-- Deliberately queried against a BARE "item:<id>" string rather than the
+-- equipped link: with no gems attached, the EMPTY_SOCKET_* counts are the
+-- item template's total sockets under either interpretation of the API,
+-- so the arithmetic doesn't depend on whether GetItemStats reports total
+-- or merely-remaining sockets for a gemmed link.
+local function SocketCount(itemID)
+    if not itemID or itemID == 0 then return nil end
+    if type(GetItemStats) ~= "function" then return nil end
+    local ok, stats = pcall(GetItemStats, "item:" .. itemID)
+    if not ok or type(stats) ~= "table" then return nil end
+    local n = 0
+    for _, key in ipairs(SOCKET_STAT_KEYS) do
+        n = n + (tonumber(stats[key]) or 0)
+    end
+    return n
+end
+
+-- Pack into "<ench>:<sockets>:<g1>:<g2>:<g3>". An unresolved socket count is
+-- written as "?" and MUST NOT be written as 0 -- a false zero permanently
+-- hides a missing gem, which is exactly the bug a cache miss would cause.
+-- Returns enchantID, gem1, gem2, gem3, gem4 -- all numbers, 0 when absent.
+-- gem4 is returned (not silently dropped) so the "no TBC item has a fourth
+-- socket" assumption is testable rather than implicit.
+local function ParseItemMods(link)
+    if type(link) ~= "string" then return 0, 0, 0, 0, 0 end
+
+    local ench, g1, g2, g3, g4 =
+        link:match("item:[^:|]+:([^:|]*):([^:|]*):([^:|]*):([^:|]*):([^:|]*)")
+
+    return tonumber(ench) or 0, tonumber(g1) or 0, tonumber(g2) or 0,
+           tonumber(g3) or 0, tonumber(g4) or 0
+end
+
+local function PackGearMod(link, itemID)
+    if type(link) ~= "string" or link == "" then return "" end
+
+    local ench, g1, g2, g3 = ParseItemMods(link)
+    local sockets = SocketCount(itemID)
+
+    return string.format("%d:%s:%d:%d:%d",
+        ench, sockets and tostring(sockets) or "?", g1, g2, g3)
+end
+
+-- Re-pack a slot once its item lands in the client cache, so an unresolved
+-- "?" socket count becomes a real one. Called from the GET_ITEM_INFO_RECEIVED
+-- retry in Core.lua.
+function AltTracker.RepackGearMod(link, itemID)
+    return PackGearMod(link, itemID)
+end
+
+-- Test seam (harmless in-game), mirroring AltTracker._test in Core.lua.
+AltTracker._testScanner = {
+    ParseItemMods = ParseItemMods,
+    PackGearMod   = PackGearMod,
+    SocketCount   = SocketCount,
+    GEAR_SLOTS    = GEAR_SLOTS,
+}
+
 local function ReadPlayerDisplayID()
     local id
 
@@ -249,7 +328,17 @@ local function ResetCharacter(char)
         char["gearname_"..slot.key] = ""   -- item name (for BiS matching)
         char["gearsubtype_"..slot.key] = ""  -- item subtype ("Dagger", "Mail", ...) — authoritative gear type
         char["gearlink_"..slot.key] = ""   -- full item link (for tooltips)
+        char["gearmod_"..slot.key]  = ""   -- packed "ench:sockets:g1:g2:g3" (synced)
     end
+
+    -- Helm/cloak display toggles. 1 = hidden, 0 = shown.
+    -- Numbers, not booleans: DeserializeChar coerces with tonumber and falls back to the raw
+    -- string, so a boolean would arrive at a peer as the STRING "true" while staying a real
+    -- boolean locally (the asymmetry restedArea already has). 1/0 round-trips as a number.
+    -- Named for the HIDDEN state so absent (record predates the field, or a peer on an older
+    -- build) reads as 0 = shown = the behaviour before this existed.
+    char.hidehelm  = 0
+    char.hidecloak = 0
 
 end
 
@@ -548,7 +637,10 @@ function AltTracker.ScanCharacter()
     -- so we can retry once the cache is populated.
     --------------------------------------------------------
 
-    local pendingLinks = {}  -- links that returned nil from GetItemInfo
+    -- Slots that returned nil from GetItemInfo. Keyed by SLOT KEY, not by link:
+    -- two identical rings/trinkets/weapons share one link, and a link-keyed table
+    -- silently drops one of the two slots' retries.
+    local pendingSlots = {}
 
     for _, slot in ipairs(GEAR_SLOTS) do
         local link = GetInventoryItemLink("player", slot.id)
@@ -556,6 +648,10 @@ function AltTracker.ScanCharacter()
             local itemID = ItemIDFromLink(link)
             char["gearid_"..slot.key] = itemID
             char["gearlink_"..slot.key] = link
+            -- Enchant and gem IDs come straight out of the link, so they resolve
+            -- even while the item itself is uncached; only the socket count inside
+            -- PackGearMod can come back unresolved ("?").
+            char["gearmod_"..slot.key] = PackGearMod(link, itemID)
             local itemName, _, quality, ilvl, _, _, itemSubType = GetItemInfo(link)
             if ilvl then
                 char["gear_"..slot.key]      = ilvl
@@ -565,7 +661,7 @@ function AltTracker.ScanCharacter()
             else
                 -- Item link exists but item data isn't cached yet. Keep the
                 -- existing ilvl/quality/name/subtype values and retry on cache event.
-                pendingLinks[link] = slot.key
+                pendingSlots[slot.key] = link
             end
         else
             char["gear_"..slot.key]      = 0
@@ -574,21 +670,31 @@ function AltTracker.ScanCharacter()
             char["gearname_"..slot.key]  = ""
             char["gearsubtype_"..slot.key] = ""
             char["gearlink_"..slot.key]  = ""
+            char["gearmod_"..slot.key]   = ""
         end
     end
+
+    -- Helm/cloak display toggles. The render pipeline needs these because the Battle.net
+    -- armory render respects them but the equipment list does not: a character with the helm
+    -- hidden would otherwise be drawn wearing a helmet they never see in game. Synced on
+    -- purpose (same reasoning as refshot_ts) — the pipeline reads ONE aggregator account, so
+    -- an alt's toggle has to ride sync to reach it.
+    -- Guarded: these are TBC-era APIs, and a missing global must not abort the whole scan.
+    char.hidehelm  = (ShowingHelm  and not ShowingHelm())  and 1 or 0
+    char.hidecloak = (ShowingCloak and not ShowingCloak()) and 1 or 0
 
     -- Only stamp lastUpdate when we have complete data.
     -- If any items are pending cache we deliberately leave the timestamp
     -- unchanged so peers don't reject a later corrected version.
-    if not next(pendingLinks) then
+    if not next(pendingSlots) then
         char.lastUpdate = time()
     end
 
     -- Register for cache-ready events to fill in pending slots
-    if next(pendingLinks) then
-        AltTracker.PendingGearLinks = AltTracker.PendingGearLinks or {}
-        for link, key in pairs(pendingLinks) do
-            AltTracker.PendingGearLinks[link] = { key = key, guid = char.guid }
+    if next(pendingSlots) then
+        AltTracker.PendingGearSlots = AltTracker.PendingGearSlots or {}
+        for key, link in pairs(pendingSlots) do
+            AltTracker.PendingGearSlots[key] = { link = link, guid = char.guid }
         end
     end
 
