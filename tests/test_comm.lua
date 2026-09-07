@@ -832,6 +832,39 @@ T.CheckMailAlerts()
 check(not chatHas("Mail expiring soon"), "mail alerts: disabling the toggle suppresses the warning")
 
 ------------------------------------------------------------
+-- GET_ITEM_INFO_RECEIVED must reach the Roster audit's pending gems
+--
+-- The handler used to bail on `not AltTracker.PendingGearSlots`, a queue that
+-- only ever holds LOCAL equipment slots and is nil whenever nothing local is
+-- waiting. Audit gem lookups never enter it, so a finding suppressed by a cache
+-- miss stayed invisible and the tab kept reading "No issues found".
+------------------------------------------------------------
+
+local refreshes = 0
+local prevRefresh = AltTracker.RefreshSheet
+AltTracker.RefreshSheet = function() refreshes = refreshes + 1 end
+
+AltTracker.PendingGearSlots  = nil          -- the case that used to return early
+AltTracker.PendingAuditItems = { [88888] = true }
+
+onEvent(T.frame, "GET_ITEM_INFO_RECEIVED", 88888, true)
+eq(refreshes, 1, "a resolved audit gem repaints even with no local gear pending")
+eq(AltTracker.PendingAuditItems[88888], nil, "the resolved gem leaves the pending queue")
+
+-- Unrelated items must not repaint: the queue is the whole point of the filter.
+onEvent(T.frame, "GET_ITEM_INFO_RECEIVED", 77777, true)
+eq(refreshes, 1, "an item nobody is waiting on triggers no repaint")
+
+-- A failed lookup is not a resolution; the gem stays queued for a later event.
+AltTracker.PendingAuditItems = { [88888] = true }
+onEvent(T.frame, "GET_ITEM_INFO_RECEIVED", 88888, false)
+eq(refreshes, 1, "a failed cache event does not repaint")
+check(AltTracker.PendingAuditItems[88888], "a failed cache event leaves the gem queued")
+
+AltTracker.RefreshSheet = prevRefresh
+AltTracker.PendingAuditItems = nil
+
+------------------------------------------------------------
 -- Summary
 ------------------------------------------------------------
 

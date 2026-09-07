@@ -411,6 +411,42 @@ RA.AddTooltipLines("head")   -- must not error with an empty index
 eq(RA.SlotLabel("mainhand"), "Main Hand", "slot labels resolve for the fallback row name")
 
 ------------------------------------------------------------
+-- Uncached gems must queue a repaint, not read as clean
+--
+-- The audit stays silent on a gem it cannot resolve (reporting "no gem" off a
+-- cache miss would be a fabricated finding). That silence is only safe if
+-- something re-runs the audit once the item lands -- otherwise the tab keeps
+-- saying "No issues found" and the badges stay clear forever.
+------------------------------------------------------------
+
+AltTracker.PendingAuditItems = nil
+
+local uncached = baseChar()
+-- 88888 is never registered in WoW.items, so both GetItemInfo (quality) and
+-- GetItemInfoInstant (colour) come back empty for it.
+uncached.gearmod_legs = "2661:1:88888:0:0"
+local uncachedIssues = AltTracker.AuditCharacter(uncached)
+
+check(uncachedIssues ~= nil, "an uncached gem still returns a list, not nil")
+eq((codes(uncachedIssues))["commonGem"], nil, "an unresolved gem is never reported as low quality")
+check(AltTracker.PendingAuditItems ~= nil, "an unresolved gem creates the pending queue")
+check(AltTracker.PendingAuditItems[88888], "the unresolved gem id is queued for a retry")
+
+-- A gem that resolves cleanly must NOT be queued: a pending entry that never
+-- clears would repaint the roster on every unrelated cache event.
+AltTracker.PendingAuditItems = nil
+AltTracker.AuditCharacter(baseChar())
+check(AltTracker.PendingAuditItems == nil or next(AltTracker.PendingAuditItems) == nil,
+      "fully cached gems queue nothing")
+
+-- GemColorCounts reports which ids it could not read, so the caller can queue
+-- them without a second lookup.
+local cc, unresolved = A.GemColorCounts({ 24028, 99999 })
+eq(cc.unknown, 1, "the unresolved gem is still counted as unknown")
+eq(#unresolved, 1, "GemColorCounts returns the unresolved ids")
+eq(unresolved[1], 99999, "…and they are the right ids")
+
+------------------------------------------------------------
 print(("audit tests passed: %d"):format(testsRun - failures))
 if failures > 0 then
     print(("audit tests FAILED: %d of %d"):format(failures, testsRun))

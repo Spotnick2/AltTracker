@@ -130,6 +130,18 @@ local GEM_SUBCLASS = {
     [8] = { "red", "blue", "yellow" },    -- Prismatic
 }
 
+-- Gem ids whose item data was not cached when the audit ran. The audit stays
+-- deliberately silent on an unresolved gem rather than fabricate a finding,
+-- which means a freshly opened roster can read "No issues found" only because
+-- the item had not loaded yet. Core.lua watches GET_ITEM_INFO_RECEIVED for
+-- these ids and calls RefreshSheet, which the Roster plugin already hooks and
+-- coalesces into a repaint -- so the finding appears once the gem lands.
+local function NotePendingGem(gemID)
+    if not gemID or gemID == 0 then return end
+    AltTracker.PendingAuditItems = AltTracker.PendingAuditItems or {}
+    AltTracker.PendingAuditItems[gemID] = true
+end
+
 -- Returns the colour list for a gem, or nil when it can't be resolved.
 -- classID must be 3 (Gem): reading an arbitrary item's subclass as a gem
 -- colour would be a quiet logic error.
@@ -153,15 +165,20 @@ end
 -- colour requirement, so they are counted separately.
 local function GemColorCounts(allGems)
     local counts = { red = 0, blue = 0, yellow = 0, meta = 0, unknown = 0 }
+    local unresolved = {}
     for _, gemID in ipairs(allGems) do
         local colors = GemColors(gemID)
         if colors then
             for _, c in ipairs(colors) do counts[c] = counts[c] + 1 end
         else
             counts.unknown = counts.unknown + 1
+            unresolved[#unresolved + 1] = gemID
         end
     end
-    return counts
+    -- Second return is the ids behind counts.unknown, so the caller can queue a
+    -- retry without resolving every gem a second time. Stays a pure function:
+    -- reporting what it could not read, not writing the pending queue itself.
+    return counts, unresolved
 end
 
 -- CLA writes its requirements as strict ">" on counts; EnchantData stores the
@@ -297,7 +314,11 @@ function AltTracker.AuditCharacter(char)
                     end
                     for _, gemID in ipairs(gems) do
                         local gq = GemQuality(gemID)
-                        if gq and gq < minGemQ then
+                        if not gq then
+                            -- Uncached: no finding is recorded, so queue a repaint
+                            -- rather than leave the slot looking clean forever.
+                            NotePendingGem(gemID)
+                        elseif gq < minGemQ then
                             local code = (gq <= 1 and "commonGem")
                                       or (gq == 2 and "uncommonGem")
                                       or "rareGem"
@@ -319,7 +340,8 @@ function AltTracker.AuditCharacter(char)
     -- Meta activation depends on every equipped gem, so it can only be judged
     -- after the whole loop.
     if metaGemID then
-        local counts = GemColorCounts(allGems)
+        local counts, unresolvedGems = GemColorCounts(allGems)
+        for _, gemID in ipairs(unresolvedGems) do NotePendingGem(gemID) end
         -- An unresolvable gem could be the one that satisfies the requirement,
         -- so stay silent rather than report a false negative.
         if counts.unknown == 0 and not MetaIsActive(AltTracker.MetaGems[metaGemID], counts) then

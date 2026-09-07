@@ -1617,7 +1617,22 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
     if event == "GET_ITEM_INFO_RECEIVED" then
         local itemID, success = ...
-        if not success or not AltTracker.PendingGearSlots then return end
+        if not success then return end
+
+        -- Gem lookups the Roster audit could not resolve. Checked BEFORE the
+        -- gear-slot queue below, which is local-equipment-only and is nil
+        -- entirely when nothing local is pending -- the early return on it used
+        -- to drop these events on the floor, so an audit finding suppressed by
+        -- a cache miss stayed invisible until something else repainted the tab.
+        -- RefreshSheet is enough: the Roster plugin hooks it and already
+        -- coalesces bursts into one deferred repaint.
+        local pendingAudit = AltTracker.PendingAuditItems
+        if pendingAudit and itemID and pendingAudit[itemID] then
+            pendingAudit[itemID] = nil
+            if AltTracker.RefreshSheet then AltTracker.RefreshSheet() end
+        end
+
+        if not AltTracker.PendingGearSlots then return end
 
         local anyResolved = false
         for slotKey, info in pairs(AltTracker.PendingGearSlots) do
